@@ -1,0 +1,48 @@
+# DevCraft systemd 服务模板（服务器模式部署）——仓库内保留的是本模板。
+#
+# 使用方法：
+#   1. 复制并按实际环境修改：  cp devcraft.service.template devcraft.service
+#      通常需要改：运行用户 / 二进制与数据目录路径 / 端口 / 日志级别
+#   2. 本地交叉编译：          task build:server:linux   （产物 bin/DevCraft-server-linux）
+#   3. 上传二进制：            scp bin/DevCraft-server-linux user@server:/opt/devcraft/
+#   4. 服务器上准备数据目录与运行用户：
+#        sudo useradd -r -s /usr/sbin/nologin devcraft
+#        sudo mkdir -p /var/lib/devcraft && sudo chown devcraft:devcraft /var/lib/devcraft
+#   5. 安装改好的服务文件：    sudo cp devcraft.service /etc/systemd/system/
+#   6. 启动：                  sudo systemctl daemon-reload && sudo systemctl enable --now devcraft
+#   7. 访问：                  http://<server-ip>:<端口>（默认应用端口 8080，见 WAILS_SERVER_PORT）
+#
+# 安全提示：本应用没有登录鉴权，请勿直接把端口暴露到公网。
+# 建议用防火墙限制来源，或放在 nginx 等反向代理后面（顺便解决 HTTPS）。
+
+[Unit]
+Description=DevCraft (Wails v3 server mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=devcraft
+WorkingDirectory=/opt/devcraft
+ExecStart=/opt/devcraft/DevCraft-server-linux
+
+# 监听地址与端口（默认应用值为 localhost:8080；对外服务需显式设 0.0.0.0）
+Environment=WAILS_SERVER_HOST=0.0.0.0
+Environment=WAILS_SERVER_PORT=8080
+# 数据目录（SQLite + secret.key），独立于二进制便于备份
+Environment=DEVCRAFT_DATA_DIR=/var/lib/devcraft
+# 日志级别：debug / info
+Environment=DEVCRAFT_LOG=info
+
+Restart=on-failure
+RestartSec=3
+
+# 基础安全加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/devcraft
+
+[Install]
+WantedBy=multi-user.target

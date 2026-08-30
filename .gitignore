@@ -1,0 +1,15 @@
+# ===== 构建产物 =====
+bin/
+build/bin
+frontend/dist
+frontend/node_modules
+
+# ===== 系统垃圾与日志 =====
+.DS_Store
+Thumbs.db
+*.log
+
+# ===== 说明 =====
+# AI 编码相关配置（.trellis/.qoder/.claude/.cursor/.idea/.doc、AGENTS.md）
+# 与本机实际部署的 devcraft.service 属于个人/本机配置，
+# 不写在这里（避免强加给协作者），统一放在 .git/info/exclude。

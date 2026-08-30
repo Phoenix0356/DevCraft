@@ -1,0 +1,77 @@
+# DevCraft 构建任务（Wails v3 使用 go-task 作为构建系统，`wails3 build` 会调用 build 任务）。
+# 手动执行需要先安装 go-task（https://taskfile.dev），或直接使用底下的 go build 命令。
+version: '3'
+
+vars:
+  APP_NAME: DevCraft
+  BIN_DIR: bin
+  # Windows 下产物加 .exe 后缀（go-task 的 OS 变量 = 当前操作系统）
+  EXE: '{{if eq OS "windows"}}.exe{{end}}'
+
+tasks:
+  frontend:
+    desc: 构建前端（Vite）
+    dir: frontend
+    cmds:
+      - npm run build
+
+  bindings:
+    desc: 重新生成前端绑定（Go 导出方法变更后执行）
+    cmds:
+      - wails3 generate bindings
+
+  build:
+    desc: 构建桌面应用（当前操作系统）
+    cmds:
+      - task: frontend
+      - task: bindings
+      - go build -o {{.BIN_DIR}}/{{.APP_NAME}}{{.EXE}} .
+
+  build:server:
+    desc: 构建无头服务器二进制（当前操作系统，-tags server）
+    cmds:
+      - task: frontend
+      - task: bindings
+      - go build -tags server -o {{.BIN_DIR}}/{{.APP_NAME}}-server{{.EXE}} .
+
+  build:server:linux:
+    desc: 交叉编译 Linux amd64 服务器二进制（CGO-free，用于 systemd 部署）
+    # 交叉编译环境变量必须放任务级 env：命令级 env 部分 go-task 版本不支持（会被静默忽略），
+    # 曾导致在 Windows 上编出错误平台的产物（上传服务器后 Exec format error）。
+    env:
+      GOOS: linux
+      GOARCH: amd64
+      CGO_ENABLED: "0"
+    cmds:
+      - task: frontend
+      - task: bindings
+      - go build -tags server -o {{.BIN_DIR}}/{{.APP_NAME}}-server-linux .
+      # 构建后自检：产物文件头必须是 ELF 魔数（7f 45 4c 46），防止又编出当前平台产物。
+      # go-task 内置 shell 在 Windows/Linux 均可用，但外部工具不同：
+      # Windows 用自带的 PowerShell 读字节，POSIX 用 coreutils 的 od，故按 OS 双写法。
+      - cmd: |
+          {{if eq OS "windows"}}
+          powershell.exe -NoProfile -Command 'if (-not (Test-Path "bin/DevCraft-server-linux")) { Write-Host "错误：未找到产物文件 bin/DevCraft-server-linux"; exit 1 }; $b=[System.IO.File]::ReadAllBytes("bin/DevCraft-server-linux"); if (-not ($b.Length -ge 4 -and $b[0] -eq 0x7f -and $b[1] -eq 0x45 -and $b[2] -eq 0x4c -and $b[3] -eq 0x46)) { Write-Host "错误：bin/DevCraft-server-linux 不是 Linux ELF（文件头应为 7f 45 4c 46），请检查所用 go-task 是否支持任务级 env（升级/更换后重跑）"; exit 1 }; Write-Host "校验通过：产物为 Linux ELF（7f 45 4c 46）"'
+          {{else}}
+          if [ ! -f bin/DevCraft-server-linux ]; then echo "错误：未找到产物文件 bin/DevCraft-server-linux" >&2; exit 1; fi; magic=$(od -A n -t x1 -N 4 bin/DevCraft-server-linux | tr -d ' \n'); if [ "$magic" != "7f454c46" ]; then echo "错误：bin/DevCraft-server-linux 不是 Linux ELF（文件头应为 7f 45 4c 46），请检查所用 go-task 是否支持任务级 env（升级/更换后重跑）" >&2; exit 1; fi; echo "校验通过：产物为 Linux ELF（7f 45 4c 46）"
+          {{end}}
+
+  run:server:
+    desc: 构建并以服务器模式运行（开发自测用）
+    cmds:
+      - task: build:server
+      - '{{.BIN_DIR}}/{{.APP_NAME}}-server{{.EXE}}'
+
+  dev:
+    desc: 桌面开发模式（vite 热重载 + WebView2 窗口）
+    # FRONTEND_DEVSERVER_URL 必须放任务级 env：命令级 env 部分 go-task 版本不支持（会被静默忽略），
+    # 与 build:server:linux 同款问题，会导致桌面开发模式连不上 vite。
+    env:
+      FRONTEND_DEVSERVER_URL: http://127.0.0.1:5173
+    cmds:
+      - cmd: npm run dev
+        dir: frontend
+        background: true
+      # 等 vite 起来（preRun 会重试，但先等一下日志更干净）
+      - cmd: sleep 2
+      - cmd: go run .
