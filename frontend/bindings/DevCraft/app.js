@@ -89,12 +89,23 @@ export function ListAgents() {
 }
 
 /**
+ * ListAgentsDetail 智能体管理明细列表（基本信息 + 已装配技能 + 可选技能全集，
+ * 技能带内置/自定义分类标记）。前端：ListAgentsDetail()
+ * @returns {$CancellablePromise<appsvc$0.AgentDetail[]>}
+ */
+export function ListAgentsDetail() {
+    return $Call.ByID(655126258).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType6($result);
+    }));
+}
+
+/**
  * ListDeployFlows 部署流程列表（设置页管理区）。
  * @returns {$CancellablePromise<store$0.DeployFlow[]>}
  */
 export function ListDeployFlows() {
     return $Call.ByID(1498518071).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType6($result);
+        return $$createType8($result);
     }));
 }
 
@@ -104,7 +115,7 @@ export function ListDeployFlows() {
  */
 export function ListSessions() {
     return $Call.ByID(827108744).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType8($result);
+        return $$createType10($result);
     }));
 }
 
@@ -116,7 +127,7 @@ export function ListSessions() {
  */
 export function ListSkills() {
     return $Call.ByID(1140726611).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType10($result);
+        return $$createType12($result);
     }));
 }
 
@@ -126,7 +137,7 @@ export function ListSkills() {
  */
 export function NewSession() {
     return $Call.ByID(2850677243).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType7($result);
+        return $$createType9($result);
     }));
 }
 
@@ -137,6 +148,19 @@ export function NewSession() {
  */
 export function RejectDeployment(id) {
     return $Call.ByID(4114365077, id);
+}
+
+/**
+ * SaveAgent 保存智能体信息（名称/模型/系统提示词；名称非空校验在编排层）。
+ * 前端：SaveAgent(id, name, model, systemPrompt)
+ * @param {string} id
+ * @param {string} name
+ * @param {string} model
+ * @param {string} systemPrompt
+ * @returns {$CancellablePromise<void>}
+ */
+export function SaveAgent(id, name, model, systemPrompt) {
+    return $Call.ByID(3768442673, id, name, model, systemPrompt);
 }
 
 /**
@@ -167,6 +191,17 @@ export function SaveSettings($in) {
  */
 export function SendMessage(sessionID, text) {
     return $Call.ByID(1496882310, sessionID, text);
+}
+
+/**
+ * SetAgentSkills 整组替换智能体的技能装配；落库即生效（Runner 每回合实时读，
+ * 下轮对话工具列表自动变化，无需通知聊天侧）。前端：SetAgentSkills(id, skillNames)
+ * @param {string} id
+ * @param {string[]} skillNames
+ * @returns {$CancellablePromise<void>}
+ */
+export function SetAgentSkills(id, skillNames) {
+    return $Call.ByID(2072536338, id, skillNames);
 }
 
 /**
@@ -205,9 +240,11 @@ const $$createType1 = $Create.Array($$createType0);
 const $$createType2 = appsvc$0.SettingsView.createFrom;
 const $$createType3 = store$0.AgentRow.createFrom;
 const $$createType4 = $Create.Array($$createType3);
-const $$createType5 = store$0.DeployFlow.createFrom;
+const $$createType5 = appsvc$0.AgentDetail.createFrom;
 const $$createType6 = $Create.Array($$createType5);
-const $$createType7 = store$0.Session.createFrom;
+const $$createType7 = store$0.DeployFlow.createFrom;
 const $$createType8 = $Create.Array($$createType7);
-const $$createType9 = appsvc$0.SkillInfo.createFrom;
+const $$createType9 = store$0.Session.createFrom;
 const $$createType10 = $Create.Array($$createType9);
+const $$createType11 = appsvc$0.SkillInfo.createFrom;
+const $$createType12 = $Create.Array($$createType11);

@@ -43,11 +43,13 @@ func NewRegistry(st *store.Store, skills *skill.Registry) *Registry {
 	return &Registry{store: st, skills: skills}
 }
 
-// SeedDefaults 确保内置运维 Agent 存在并保持最新（幂等）。
-// 每次启动都 upsert：既负责首次"出厂预装"，也把旧版点号命名的
-// 技能装配迁移为下划线命名（LLM 工具名字符集不允许点号），
-// 并把新增技能（如 deploy_run_flow）补进旧库的装配列表。
+// SeedDefaults 确保内置运维 Agent 存在（幂等：已存在则跳过）。
+// 只负责首次"出厂预装"；一旦存在，名称/模型/提示词/装配全部视为用户数据，
+// 重启绝不覆盖（用户对内置 Agent 的编辑必须跨重启保留）。
 func (r *Registry) SeedDefaults() error {
+	if _, err := r.store.GetAgent(BuiltinOpsAgentID); err == nil {
+		return nil // 已存在：跳过，不覆盖用户编辑
+	}
 	return r.store.UpsertAgent(store.AgentRow{
 		ID:           BuiltinOpsAgentID,
 		Name:         "运维 Agent",
@@ -75,6 +77,48 @@ func (r *Registry) Upsert(a store.AgentRow) error {
 		return err
 	}
 	return r.store.UpsertAgent(a)
+}
+
+// Update 修改 Agent 的信息（名称/模型/系统提示词），不触碰装配。
+// 保护语义：id 是定位主键无从修改；builtin 标记不得翻转——入参 builtin
+// 与库中记录不一致即拒绝（防止把内置身份篡改掉或给自定义 Agent 伪造内置身份）。
+func (r *Registry) Update(a store.AgentRow) error {
+	cur, err := r.store.GetAgent(a.ID)
+	if err != nil {
+		return fmt.Errorf("智能体不存在: %s", a.ID)
+	}
+	if a.Builtin != cur.Builtin {
+		return fmt.Errorf("不允许修改智能体的内置标记: %s", a.ID)
+	}
+	return r.store.UpdateAgent(a)
+}
+
+// SetSkills 整组替换 Agent 的技能装配：先逐个校验名称真实存在于技能注册表，
+// 再事务性全量替换（空列表合法 = 纯聊天智能体）。落库即生效：
+// Runner 每回合实时读装配，下一轮对话的工具列表自动变化，无需额外通知。
+func (r *Registry) SetSkills(agentID string, skillNames []string) error {
+	if _, err := r.store.GetAgent(agentID); err != nil {
+		return fmt.Errorf("智能体不存在: %s", agentID)
+	}
+	for _, n := range skillNames {
+		if _, ok := r.skills.Get(n); !ok {
+			return fmt.Errorf("技能不存在，无法装配: %s", n)
+		}
+	}
+	return r.store.ReplaceAgentSkills(agentID, skillNames)
+}
+
+// Delete 删除 Agent（连同其装配关系）。内置智能体受保护，拒绝删除。
+// 本期绑定层不暴露删除入口，此方法为后端 CRUD 预留扩展点。
+func (r *Registry) Delete(id string) error {
+	cur, err := r.store.GetAgent(id)
+	if err != nil {
+		return fmt.Errorf("智能体不存在: %s", id)
+	}
+	if cur.Builtin {
+		return fmt.Errorf("内置智能体不可删除: %s", cur.Name)
+	}
+	return r.store.DeleteAgent(id)
 }
 
 // Events 是 Runner 向调用方（appsvc）汇报过程的回调集合。

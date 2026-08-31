@@ -346,6 +346,49 @@ func (s *Store) agentSkills(agentID string) ([]string, error) {
 	return out, rows.Err()
 }
 
+// UpdateAgent 只更新名称/系统提示词/模型三项信息
+// （不触碰 builtin 标记与技能装配——装配替换走 ReplaceAgentSkills）。
+func (s *Store) UpdateAgent(a AgentRow) error {
+	_, err := s.db.Exec(`UPDATE agents SET name = ?, system_prompt = ?, model = ? WHERE id = ?`,
+		a.Name, a.SystemPrompt, a.Model, a.ID)
+	return err
+}
+
+// ReplaceAgentSkills 整组替换某 Agent 的技能装配（事务内先删后插，结果与入参完全一致）。
+// 空列表 = 清空装配（纯聊天 Agent，合法状态）。
+func (s *Store) ReplaceAgentSkills(agentID string, skills []string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // 已 Commit 后 Rollback 是 no-op（防御性）
+	if _, err := tx.Exec(`DELETE FROM agent_skills WHERE agent_id = ?`, agentID); err != nil {
+		return err
+	}
+	for _, sk := range skills {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO agent_skills (agent_id, skill_name) VALUES (?, ?)`, agentID, sk); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// DeleteAgent 删除 Agent 及其装配关系（级联清理中间表，避免孤儿行）。
+func (s *Store) DeleteAgent(id string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM agent_skills WHERE agent_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM agents WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // ===================== Settings（键值设置）=====================
 
 // GetSetting 读设置项。返回 (值, 是否存在, 错误)——Go 惯用多返回值代替 Optional。

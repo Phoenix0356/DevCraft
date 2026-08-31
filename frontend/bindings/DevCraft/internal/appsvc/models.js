@@ -14,6 +14,137 @@ import * as json$0 from "../../../encoding/json/models.js";
 import * as jsontext$0 from "../../../encoding/json/jsontext/models.js";
 
 /**
+ * AgentDetail 单个智能体的管理明细（智能体管理弹窗列表卡片与详情的数据源）。
+ */
+export class AgentDetail {
+    /**
+     * Creates a new AgentDetail instance.
+     * @param {Partial<AgentDetail>} [$$source = {}] - The source object to create the AgentDetail.
+     */
+    constructor($$source = {}) {
+        if (!("id" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["id"] = "";
+        }
+        if (!("name" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["name"] = "";
+        }
+        if (!("model" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["model"] = "";
+        }
+        if (!("systemPrompt" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["systemPrompt"] = "";
+        }
+        if (!("builtin" in $$source)) {
+            /**
+             * @member
+             * @type {boolean}
+             */
+            this["builtin"] = false;
+        }
+        if (!("skills" in $$source)) {
+            /**
+             * 已装配技能（卡片计数与详情回显）
+             * @member
+             * @type {AgentSkillInfo[]}
+             */
+            this["skills"] = [];
+        }
+        if (!("availableSkills" in $$source)) {
+            /**
+             * 可选技能全集（装配区复选列表，含分类标记）
+             * @member
+             * @type {AgentSkillInfo[]}
+             */
+            this["availableSkills"] = [];
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new AgentDetail instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {AgentDetail}
+     */
+    static createFrom($$source = {}) {
+        const $$createField5_0 = $$createType1;
+        const $$createField6_0 = $$createType1;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("skills" in $$parsedSource) {
+            $$parsedSource["skills"] = $$createField5_0($$parsedSource["skills"]);
+        }
+        if ("availableSkills" in $$parsedSource) {
+            $$parsedSource["availableSkills"] = $$createField6_0($$parsedSource["availableSkills"]);
+        }
+        return new AgentDetail(/** @type {Partial<AgentDetail>} */($$parsedSource));
+    }
+}
+
+/**
+ * AgentSkillInfo 装配区/已装配列表中单个技能的展示元数据。
+ */
+export class AgentSkillInfo {
+    /**
+     * Creates a new AgentSkillInfo instance.
+     * @param {Partial<AgentSkillInfo>} [$$source = {}] - The source object to create the AgentSkillInfo.
+     */
+    constructor($$source = {}) {
+        if (!("name" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["name"] = "";
+        }
+        if (!("description" in $$source)) {
+            /**
+             * 描述（实时值；部署技能含动态流程清单）
+             * @member
+             * @type {string}
+             */
+            this["description"] = "";
+        }
+        if (!("builtin" in $$source)) {
+            /**
+             * Builtin 分类标记：内置/自定义。来自技能注册表侧（Registry.IsBuiltin），
+             * 本期全部内置；为下期自定义技能预留，前端只认标记不按名字判断。
+             * @member
+             * @type {boolean}
+             */
+            this["builtin"] = false;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new AgentSkillInfo instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {AgentSkillInfo}
+     */
+    static createFrom($$source = {}) {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new AgentSkillInfo(/** @type {Partial<AgentSkillInfo>} */($$parsedSource));
+    }
+}
+
+/**
  * Settings 前端提交的设置表单（apiKey/sshPassword 留空表示不修改）。
  */
 export class Settings {
@@ -213,3 +344,7 @@ export class SkillInfo {
         return new SkillInfo(/** @type {Partial<SkillInfo>} */($$parsedSource));
     }
 }
+
+// Private type creation functions
+const $$createType0 = AgentSkillInfo.createFrom;
+const $$createType1 = $Create.Array($$createType0);

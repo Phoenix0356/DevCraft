@@ -12,14 +12,14 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application" // Wails v3 应用框架（Streams/生命周期）
 
-	"DevCraft/internal/agent"         // Agent 引擎：Agent 定义注册表 + tool-calling 循环
-	"DevCraft/internal/appsvc"        // 编排层：会话/路由/设置的业务逻辑（本文件只做转发）
-	"DevCraft/internal/dockerx"       // Docker SDK 封装
-	"DevCraft/internal/secrets"       // API Key 加解密
-	"DevCraft/internal/skill"         // Skill 接口与注册表
-	"DevCraft/internal/skill/deploy"  // 一键部署技能（生成待审批单，批准后由 appsvc 执行）
-	"DevCraft/internal/skill/ops"     // 运维域内置技能
-	"DevCraft/internal/store"         // SQLite 持久层
+	"DevCraft/internal/agent"        // Agent 引擎：Agent 定义注册表 + tool-calling 循环
+	"DevCraft/internal/appsvc"       // 编排层：会话/路由/设置的业务逻辑（本文件只做转发）
+	"DevCraft/internal/dockerx"      // Docker SDK 封装
+	"DevCraft/internal/secrets"      // API Key 加解密
+	"DevCraft/internal/skill"        // Skill 接口与注册表
+	"DevCraft/internal/skill/deploy" // 一键部署技能（生成待审批单，批准后由 appsvc 执行）
+	"DevCraft/internal/skill/ops"    // 运维域内置技能
+	"DevCraft/internal/store"        // SQLite 持久层
 )
 
 // chatStreamName 是聊天流式推送的 v3 Stream 通道名。
@@ -233,6 +233,38 @@ func (a *App) ListAgents() ([]store.AgentRow, error) {
 		return nil, err
 	}
 	return svc.ListAgents()
+}
+
+// --- 智能体管理（信息编辑 + 技能装配）---
+
+// ListAgentsDetail 智能体管理明细列表（基本信息 + 已装配技能 + 可选技能全集，
+// 技能带内置/自定义分类标记）。前端：ListAgentsDetail()
+func (a *App) ListAgentsDetail() ([]appsvc.AgentDetail, error) {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return nil, err
+	}
+	return svc.ListAgentsDetail()
+}
+
+// SaveAgent 保存智能体信息（名称/模型/系统提示词；名称非空校验在编排层）。
+// 前端：SaveAgent(id, name, model, systemPrompt)
+func (a *App) SaveAgent(id, name, model, systemPrompt string) error {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return err
+	}
+	return svc.SaveAgent(id, name, model, systemPrompt)
+}
+
+// SetAgentSkills 整组替换智能体的技能装配；落库即生效（Runner 每回合实时读，
+// 下轮对话工具列表自动变化，无需通知聊天侧）。前端：SetAgentSkills(id, skillNames)
+func (a *App) SetAgentSkills(id string, skillNames []string) error {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return err
+	}
+	return svc.SetAgentSkills(id, skillNames)
 }
 
 // ListSkills 全部技能的元数据（名称/描述/参数 Schema，按名排序）。

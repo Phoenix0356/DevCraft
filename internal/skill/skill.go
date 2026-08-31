@@ -111,3 +111,12 @@ func (r *Registry) All() []Skill {
 	}
 	return out
 }
+
+// IsBuiltin 返回某技能是否内置（技能分类标记的唯一来源）。
+// 本期技能全部是编译期注册，故已注册即内置；该方法作为分类的统一入口而存在——
+// 下期自定义技能落地时在此按注册来源判定，消费方（前端分组展示）始终只认
+// 这个标记，不按名字硬编码判断。
+func (r *Registry) IsBuiltin(name string) bool {
+	_, ok := r.Get(name)
+	return ok
+}

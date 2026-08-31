@@ -30,6 +30,7 @@ import {
 import {renderMarkdown} from '../lib/markdown'     // Markdown → HTML
 import SettingsModal from './SettingsModal.vue'     // 设置弹窗子组件
 import SkillManager from './SkillManager.vue'       // 技能管理弹窗（侧边栏独立入口）
+import AgentManager from './AgentManager.vue'       // 智能体管理弹窗（侧边栏独立入口）
 
 // ---------------- 响应式状态（≈ 组件的成员变量）----------------
 const message = useMessage()          // 顶部轻提示器
@@ -43,6 +44,7 @@ const sending = ref(false)            // 是否正在等待 Agent 回合结束
 const streaming = ref(null)           // 流式气泡状态 {content, tools:[]}；null = 不在流式中
 const showSettings = ref(false)       // 设置弹窗显隐（与 SettingsModal 双向绑定）
 const showSkills = ref(false)         // 技能管理弹窗显隐（与 SkillManager 双向绑定）
+const showAgents = ref(false)         // 智能体管理弹窗显隐（与 AgentManager 双向绑定）
 const listRef = ref(null)             // 消息列表 DOM 引用（模板里 ref="listRef" 自动注入），用于滚动
 
 // 当前会话绑定的 Agent id（computed：currentSession 变则自动重算）
@@ -397,6 +399,12 @@ onBeforeUnmount(() => {
 watch(showSettings, async (v) => {
   if (!v) await loadAgents()
 })
+
+// 智能体管理弹窗关闭后刷新 Agent 列表（名称可能已被编辑；
+// 会话绑定与装配无需处理——会话只存 agentId，Runner 每回合实时读装配）
+watch(showAgents, async (v) => {
+  if (!v) await loadAgents()
+})
 </script>
 
 <template>
@@ -433,6 +441,8 @@ watch(showSettings, async (v) => {
         <n-button block quaternary @click="showSettings = true">⚙ 设置</n-button>
         <!-- 技能管理独立入口：打开 SkillManager 弹窗（技能卡片列表） -->
         <n-button block quaternary @click="showSkills = true">🧩 技能</n-button>
+        <!-- 智能体管理独立入口：打开 AgentManager 弹窗（信息编辑 + 技能装配） -->
+        <n-button block quaternary @click="showAgents = true">🤖 智能体</n-button>
       </div>
     </n-layout-sider>
 
@@ -547,6 +557,9 @@ watch(showSettings, async (v) => {
 
   <!-- 技能管理弹窗（侧边栏"技能"按钮打开的独立入口） -->
   <SkillManager v-model:show="showSkills"/>
+
+  <!-- 智能体管理弹窗（侧边栏"智能体"按钮打开的独立入口） -->
+  <AgentManager v-model:show="showAgents"/>
 </template>
 
 <!-- scoped：样式只作用于本组件（避免全局污染，≈ CSS Modules） -->
@@ -567,7 +580,7 @@ watch(showSettings, async (v) => {
 .session-item:hover .session-del { opacity: 1; } /* 悬停时才显示删除按钮 */
 .sider-foot {
   padding: 8px 12px; border-top: 1px solid rgba(255,255,255,0.08);
-  display: flex; flex-direction: column; gap: 2px; /* 设置 / 技能两个入口按钮纵向堆叠 */
+  display: flex; flex-direction: column; gap: 2px; /* 设置 / 技能 / 智能体三个入口按钮纵向堆叠 */
 }
 .empty { margin-top: 40px; }
 .main { display: flex; flex-direction: column; }
