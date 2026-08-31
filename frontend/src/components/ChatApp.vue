@@ -423,7 +423,8 @@ watch(view, (v, oldV) => {
   <n-layout has-sider class="app-layout">
 
     <!-- ============ 左侧：会话侧边栏 ============ -->
-    <n-layout-sider bordered :width="250" class="sider">
+    <!-- 280px：16:9 宽屏下稍宽，容纳更长的会话标题；主区 flex 自适应剩余宽度 -->
+    <n-layout-sider bordered :width="280" class="sider">
       <div class="sider-head">
         <div class="brand">DevCraft</div>
         <n-button size="small" type="primary" ghost block @click="createSession">+ 新会话</n-button>
@@ -601,7 +602,12 @@ watch(view, (v, oldV) => {
 
 <!-- scoped：样式只作用于本组件（避免全局污染，≈ CSS Modules） -->
 <style scoped>
-.app-layout { height: 100vh; }
+/* 全屏链条：html/body/#app 高度在 style.css；此处保证布局本身显式占满视口。
+   .app-layout 显式 flex + width/height：不依赖 n-layout 默认块级行为，
+   服务器模式（浏览器标签页）下也稳定铺满。
+   .main 显式 height + flex:1：右侧视图吃掉侧边栏之外的全部剩余宽/高 */
+.app-layout { display: flex; width: 100%; height: 100vh; }
+.main { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; }
 .sider { display: flex; flex-direction: column; }
 .sider-head { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
 .brand { font-weight: 700; font-size: 16px; letter-spacing: 1px; }
@@ -637,14 +643,14 @@ watch(view, (v, oldV) => {
   --n-color-focus: rgba(99,226,183,0.22) !important;
 }
 .empty { margin-top: 40px; }
-.main { display: flex; flex-direction: column; }
 /* 聊天视图包裹层：v-show 常驻（三态切换不卸载聊天 DOM）。
    撑满主区并以 flex 列排布子区，消息流 flex:1 内部滚动、输入区钉底 */
 .chat-view { display: flex; flex-direction: column; height: 100%; }
 .chat-head { padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; }
 .hint { color: rgba(255,255,255,0.45); font-size: 13px; }
 .chat-list { flex: 1; overflow-y: auto; padding: 16px 24px; }
-.msg { margin-bottom: 18px; max-width: 860px; }
+/* 气泡宽度随视图拉伸：16:9 宽屏下占满主区（1600px 上限防超宽屏行长失控） */
+.msg { margin-bottom: 18px; max-width: min(1600px, 100%); }
 .msg-role { font-size: 12px; color: rgba(255,255,255,0.45); margin-bottom: 4px; }
 .msg.user .msg-body {
   background: rgba(99,226,183,0.12); border-radius: 8px; padding: 8px 12px; display: inline-block;
