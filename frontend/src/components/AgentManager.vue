@@ -1,24 +1,22 @@
 <!--
-  AgentManager.vue —— 智能体管理弹窗（独立入口，侧边栏"技能"按钮下方）。
+  AgentManager.vue —— 智能体管理视图（右侧主区三态之一：聊天/技能/智能体，非弹窗）。
+  ChatApp 以 v-if 渲染本组件：进入"智能体"视图即挂载、离开即卸载。
   智能体 = 人设信息（名称/模型/系统提示词）+ 技能装配，两者均可在此编辑：
-  ① 智能体卡片列表：数据来自后端 ListAgentsDetail（前端零硬编码）
-     - 卡片展示：名称 + 内置标记 + 已装配技能数；点击进入详情弹窗（二级）
+  ① 智能体卡片网格占满整个视图：数据来自后端 ListAgentsDetail（前端零硬编码）
+     - 卡片展示：名称 + 内置标记 + 装配技能数 + 提示词摘要；点击弹出详情弹窗
   ② 详情弹窗上部 = 信息编辑（名称/模型/系统提示词），保存调 SaveAgent
   ③ 详情弹窗下部 = 技能装配区：复选列表按"内置/自定义"分组（分类标记来自
      后端注册表侧，前端不按名字判断），保存调 SetAgentSkills 整组替换；
      装配落库即生效——Runner 每回合实时读装配，下轮对话工具列表自动变化，
      无需通知聊天侧。装配为 0 合法：退化为纯聊天智能体，界面给出提示。
+  保存成功 → 刷新列表并关闭弹窗；失败则弹窗保留、错误原地回显。
   内置保护：内置智能体不可删除（本期无删除入口；新建下期做）。
-  父子组件通信同 SkillManager：props = 父→子入参；emit = 子→父事件。
+  弹窗有遮罩，且每次打开编辑态都从所点智能体整体重建，切换不会串数据。
 -->
 <script setup>
-import {computed, ref, watch} from 'vue'
+import {computed, onMounted, ref} from 'vue'
 import {useMessage} from 'naive-ui'
 import {ListAgentsDetail, SaveAgent, SetAgentSkills} from '../../bindings/DevCraft/app.js'
-
-// ---------------- props / emits 声明 ----------------
-const props = defineProps({show: Boolean}) // 父组件传入的显隐状态
-const emit = defineEmits(['update:show'])  // 可发出的事件名列表
 
 const message = useMessage()
 
@@ -27,7 +25,7 @@ const agents = ref([])   // 智能体明细列表（含已装配技能与可选�
 const detail = ref(null) // 当前打开详情弹窗的智能体；null = 未打开
 
 // ---------------- 详情编辑状态 ----------------
-// 信息编辑表单（打开详情时从明细拷贝，保存成功后重拉）
+// 信息编辑表单（打开弹窗时从明细拷贝，保存成功后刷新列表）
 const form = ref({name: '', model: '', systemPrompt: ''})
 // 装配勾选状态：已勾选的技能名数组（与 n-checkbox-group 双向绑定）
 const checked = ref([])
@@ -54,20 +52,23 @@ async function loadAgents() {
   }
 }
 
-/** 打开详情弹窗：拷贝信息表单 + 回显已装配的勾选状态 */
+/** 打开详情弹窗：编辑态整体从所点智能体重建（表单与勾选均重新拷贝）。
+ *  弹窗有遮罩，打开下一个智能体时上一个弹窗必然已关闭，不存在串数据窗口 */
 function openDetail(a) {
   detail.value = a
   form.value = {name: a.name, model: a.model || '', systemPrompt: a.systemPrompt || ''}
   checked.value = a.skills.map(s => s.name)
 }
 
-/** 保存信息（名称/模型/系统提示词）：成功后刷新列表并同步当前详情对象 */
+/** 保存信息（名称/模型/系统提示词）：成功后刷新列表并关闭弹窗；失败弹窗保留、错误回显。
+ *  弹窗有遮罩：保存途中用户无法切换到别的智能体，无竞态窗口 */
 async function saveInfo() {
   savingInfo.value = true
   try {
     await SaveAgent(detail.value.id, form.value.name, form.value.model, form.value.systemPrompt)
     message.success('智能体信息已保存')
-    await reloadDetail()
+    await loadAgents()   // 卡片上的名称/摘要可能已变化
+    detail.value = null  // 关闭弹窗
   } catch (err) {
     message.error(String(err)) // 后端校验错误（名称为空等）直接展示
   } finally {
@@ -75,13 +76,15 @@ async function saveInfo() {
   }
 }
 
-/** 保存装配（整组替换）：勾选状态即最终装配，空勾选 = 纯聊天智能体 */
+/** 保存装配（整组替换）：勾选状态即最终装配，空勾选 = 纯聊天智能体。
+ *  成功同样刷新列表（卡片装配计数变化）并关闭弹窗 */
 async function saveSkills() {
   savingSkills.value = true
   try {
     await SetAgentSkills(detail.value.id, checked.value)
     message.success('技能装配已保存，下轮对话生效')
-    await reloadDetail()
+    await loadAgents()
+    detail.value = null
   } catch (err) {
     message.error(String(err))
   } finally {
@@ -89,43 +92,14 @@ async function saveSkills() {
   }
 }
 
-/** 重拉列表并把当前详情指向最新数据（保持编辑面板打开） */
-async function reloadDetail() {
-  const id = detail.value.id
-  await loadAgents()
-  const fresh = agents.value.find(a => a.id === id)
-  if (!fresh) {
-    detail.value = null
-    return
-  }
-  detail.value = fresh
-  form.value = {name: fresh.name, model: fresh.model || '', systemPrompt: fresh.systemPrompt || ''}
-  checked.value = fresh.skills.map(s => s.name)
-}
-
-// watch 监听 props.show：打开时拉取最新列表；
-// 关闭时收起详情弹窗（避免下次打开残留，同 SkillManager 模式）。
-watch(() => props.show, (v) => {
-  if (v) {
-    loadAgents()
-  } else {
-    detail.value = null
-  }
-})
+// 视图挂载即加载数据（每次进入智能体视图都会拿到最新明细快照）
+onMounted(loadAgents)
 </script>
 
 <template>
-  <!-- 管理主弹窗：智能体卡片列表 -->
-  <n-modal
-    :show="props.show"
-    preset="card"
-    title="智能体管理"
-    style="width: 760px"
-    @update:show="emit('update:show', $event)"
-  >
-    <div class="agents-tip">
-      智能体 = 人设提示词 + 装配的技能；对话中按会话绑定的智能体执行。点击卡片编辑信息与装配。
-    </div>
+  <!-- 卡片网格占满整个视图：响应式网格，列数随容器宽度自适应 -->
+  <div class="mgr-view">
+    <div class="mgr-tip">智能体 = 人设提示词 + 装配的技能；对话中按会话绑定的智能体执行。点击卡片编辑信息与装配。</div>
     <div class="agent-grid">
       <div v-for="a in agents" :key="a.id" class="agent-card" @click="openDetail(a)">
         <div class="agent-head">
@@ -136,10 +110,10 @@ watch(() => props.show, (v) => {
         <div class="agent-meta">已装配 {{ a.skills.length }} 个技能</div>
       </div>
     </div>
-    <n-empty v-if="agents.length === 0" description="暂无智能体" size="small"/>
-  </n-modal>
+    <n-empty v-if="agents.length === 0" description="暂无智能体" size="small" class="empty"/>
+  </div>
 
-  <!-- 详情弹窗（二级，叠加在管理弹窗之上）：上部信息编辑 + 下部技能装配 -->
+  <!-- 详情弹窗：上部信息编辑 + 下部技能装配 -->
   <n-modal
     v-if="detail"
     :show="true"
@@ -212,9 +186,13 @@ watch(() => props.show, (v) => {
 </template>
 
 <style scoped>
-/* ---- 智能体卡片列表 ---- */
-.agents-tip { font-size: 12px; color: rgba(255,255,255,0.5); margin-bottom: 10px; }
-.agent-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+/* ---- 视图容器：卡片网格占满整个视图，内容超高时整体纵向滚动 ---- */
+.mgr-view { height: 100%; overflow-y: auto; padding: 16px 20px; }
+.mgr-tip { font-size: 12px; color: rgba(255,255,255,0.5); line-height: 1.6; margin-bottom: 12px; }
+.empty { margin-top: 40px; }
+
+/* ---- 智能体卡片网格：列数随宽度自适应（每列至少 280px） ---- */
+.agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
 .agent-card {
   border: 1px solid rgba(255,255,255,0.09); border-radius: 8px; padding: 12px;
   cursor: pointer; transition: border-color .15s, background .15s;

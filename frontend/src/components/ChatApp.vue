@@ -1,6 +1,12 @@
 <!--
   ChatApp.vue —— 应用主界面（前端最核心的文件）。
-  布局：左侧会话侧边栏 + 右侧聊天区（头部 Agent 选择器 / 中部消息流 / 底部输入框）。
+  布局：左侧会话侧边栏 + 右侧主区（三态视图，由 view 状态变量控制）：
+    chat   —— 聊天区（头部 Agent 选择器 / 中部消息流 / 底部输入框）
+    skills —— 技能管理视图（SkillManager：卡片网格占满视图，详情为弹窗）
+    agents —— 智能体管理视图（AgentManager：卡片网格占满视图，详情为弹窗）
+  技能/智能体为整个主区切换的视图（视图内详情用弹窗）；设置仍走 SettingsModal 弹窗。
+  切到技能/智能体视图时聊天区 DOM 以 v-show 保留：流式帧照常接收处理，
+  切回聊天页消息不丢、气泡与滚动状态原样。
   与 Go 后端的两条通信链路（Wails v3，桌面/浏览器两种环境通用）：
     ① 绑定桩函数调用（请求-响应，返回 Promise ≈ JS 的 Future）
     ② 聊天流 JSONStream('chat')（Go 主动推送流式增量：chat:delta / chat:tool / chat:done 帧）
@@ -29,8 +35,8 @@ import {
 
 import {renderMarkdown} from '../lib/markdown'     // Markdown → HTML
 import SettingsModal from './SettingsModal.vue'     // 设置弹窗子组件
-import SkillManager from './SkillManager.vue'       // 技能管理弹窗（侧边栏独立入口）
-import AgentManager from './AgentManager.vue'       // 智能体管理弹窗（侧边栏独立入口）
+import SkillManager from './SkillManager.vue'       // 技能管理视图（主区三态之一，卡片网格 + 详情弹窗）
+import AgentManager from './AgentManager.vue'       // 智能体管理视图（主区三态之一，卡片网格 + 详情弹窗）
 
 // ---------------- 响应式状态（≈ 组件的成员变量）----------------
 const message = useMessage()          // 顶部轻提示器
@@ -43,8 +49,8 @@ const input = ref('')                 // 输入框双向绑定的文本
 const sending = ref(false)            // 是否正在等待 Agent 回合结束
 const streaming = ref(null)           // 流式气泡状态 {content, tools:[]}；null = 不在流式中
 const showSettings = ref(false)       // 设置弹窗显隐（与 SettingsModal 双向绑定）
-const showSkills = ref(false)         // 技能管理弹窗显隐（与 SkillManager 双向绑定）
-const showAgents = ref(false)         // 智能体管理弹窗显隐（与 AgentManager 双向绑定）
+// 右侧主区当前视图：'chat' | 'skills' | 'agents'（技能/智能体为整块视图，不再是弹窗）
+const view = ref('chat')
 const listRef = ref(null)             // 消息列表 DOM 引用（模板里 ref="listRef" 自动注入），用于滚动
 
 // 当前会话绑定的 Agent id（computed：currentSession 变则自动重算）
@@ -226,8 +232,11 @@ async function createSession() {
   await selectSession(sess)
 }
 
-/** 打开某个会话：设为当前、加载历史消息、滚到底部 */
+/** 打开某个会话：切回聊天视图、设为当前、加载历史消息、滚到底部。
+ *  所有进入会话的路径（会话项点击/新建会话/初始自动选中）都经过这里，
+ *  选会话即语义明确地要看聊天，故在此统一重置三态视图状态 */
 async function selectSession(sess) {
+  view.value = 'chat'
   currentSession.value = sess
   streaming.value = null       // 切会话时丢弃旧的流式状态（若旧回合仍在跑，
   // 看门狗保持守卫：任何会话的帧都会重置它，回合 RPC 结束时 finally 清除）
@@ -400,10 +409,12 @@ watch(showSettings, async (v) => {
   if (!v) await loadAgents()
 })
 
-// 智能体管理弹窗关闭后刷新 Agent 列表（名称可能已被编辑；
+// 视图切换收尾：回到聊天页滚到底部（离开期间到达的帧未能驱动跟随滚动）；
+// 离开智能体视图后刷新头部下拉的 Agent 列表（名称可能已被编辑；
 // 会话绑定与装配无需处理——会话只存 agentId，Runner 每回合实时读装配）
-watch(showAgents, async (v) => {
-  if (!v) await loadAgents()
+watch(view, (v, oldV) => {
+  if (v === 'chat') nextTick(scrollToBottom)
+  if (oldV === 'agents' && v !== 'agents') loadAgents()
 })
 </script>
 
@@ -438,16 +449,40 @@ watch(showAgents, async (v) => {
       </div>
 
       <div class="sider-foot">
-        <n-button block quaternary @click="showSettings = true">⚙ 设置</n-button>
-        <!-- 技能管理独立入口：打开 SkillManager 弹窗（技能卡片列表） -->
-        <n-button block quaternary @click="showSkills = true">🧩 技能</n-button>
-        <!-- 智能体管理独立入口：打开 AgentManager 弹窗（信息编辑 + 技能装配） -->
-        <n-button block quaternary @click="showAgents = true">🤖 智能体</n-button>
+        <!-- 三个入口按钮统一结构：固定宽度图标列 + 左对齐文字列（flex 布局），
+             图标纵向对齐成一列、文字也对齐成一列；保留 block quaternary 观感 -->
+        <n-button block quaternary class="sider-btn" @click="showSettings = true">
+          <span class="sider-btn-icon">⚙</span>
+          <span class="sider-btn-label">设置</span>
+        </n-button>
+        <!-- 技能：右侧主区切换为技能管理视图（卡片网格占满视图；详情为弹窗） -->
+        <n-button
+          block quaternary class="sider-btn"
+          :class="{active: view === 'skills'}"
+          @click="view = 'skills'"
+        >
+          <span class="sider-btn-icon">🧩</span>
+          <span class="sider-btn-label">技能</span>
+        </n-button>
+        <!-- 智能体：右侧主区切换为智能体管理视图（卡片网格占满视图；详情为弹窗） -->
+        <n-button
+          block quaternary class="sider-btn"
+          :class="{active: view === 'agents'}"
+          @click="view = 'agents'"
+        >
+          <span class="sider-btn-icon">🤖</span>
+          <span class="sider-btn-label">智能体</span>
+        </n-button>
       </div>
     </n-layout-sider>
 
-    <!-- ============ 右侧：聊天主区 ============ -->
+    <!-- ============ 右侧：主区（三态视图：聊天 / 技能 / 智能体） ============ -->
     <n-layout class="main">
+
+      <!-- ---- chat 视图：v-show 保持 DOM 常驻（而非 v-if 卸载）。
+           切去技能/智能体视图期间，流式帧照常写入消息与气泡状态；
+           切回时消息不丢、气泡状态正确、滚动位置保留 ---- -->
+      <div v-show="view === 'chat'" class="chat-view">
 
       <!-- 头部：Agent 选择器。:options 绑定 JS 表达式：把 Agent 列表映射成下拉选项数组；
            Naive UI 组件的值更新事件统一叫 update:xxx -->
@@ -548,18 +583,20 @@ watch(showAgents, async (v) => {
         <n-button v-if="sending || deployRunning" type="warning" secondary @click="stopTurn">停止</n-button>
         <n-button type="primary" :loading="sending" :disabled="!input.trim()" @click="send">发送</n-button>
       </div>
+
+      </div><!-- /.chat-view -->
+
+      <!-- ---- skills 视图：技能管理（卡片网格 + 详情弹窗）。v-if 渲染——进入视图挂载并加载数据，离开即卸载 ---- -->
+      <SkillManager v-if="view === 'skills'"/>
+
+      <!-- ---- agents 视图：智能体管理（卡片网格 + 详情弹窗）。同上 ---- -->
+      <AgentManager v-if="view === 'agents'"/>
     </n-layout>
   </n-layout>
 
   <!-- 设置弹窗。v-model:show 双向绑定显隐状态：
        弹窗内部关闭时会把 show 写回 false（父子组件通信的简洁写法） -->
   <SettingsModal v-model:show="showSettings"/>
-
-  <!-- 技能管理弹窗（侧边栏"技能"按钮打开的独立入口） -->
-  <SkillManager v-model:show="showSkills"/>
-
-  <!-- 智能体管理弹窗（侧边栏"智能体"按钮打开的独立入口） -->
-  <AgentManager v-model:show="showAgents"/>
 </template>
 
 <!-- scoped：样式只作用于本组件（避免全局污染，≈ CSS Modules） -->
@@ -582,8 +619,28 @@ watch(showAgents, async (v) => {
   padding: 8px 12px; border-top: 1px solid rgba(255,255,255,0.08);
   display: flex; flex-direction: column; gap: 2px; /* 设置 / 技能 / 智能体三个入口按钮纵向堆叠 */
 }
+/* 入口按钮对齐：n-button 默认内容居中——撑满其内部 __content 容器后，
+   用"固定宽度图标列 + 左对齐文字列"的 flex 行实现三按钮图标/文字各自纵向成列。
+   （保留 block quaternary 观感，仅改内容排布） */
+.sider-btn :deep(.n-button__content) { width: 100%; }
+.sider-btn-icon {
+  width: 24px; flex: 0 0 24px; font-size: 16px; line-height: 1; text-align: left;
+}
+.sider-btn-label { flex: 1; text-align: left; }
+/* 当前激活视图对应的按钮：轻度高亮（沿用会话列表 .active 的绿色系）。
+   quaternary 按钮的背景/文字色由 --n-color* 变量驱动（组件内联样式注入），
+   故以 !important 的变量覆盖实现选中态 */
+.sider-btn.active {
+  --n-color: rgba(99,226,183,0.15) !important;
+  --n-color-hover: rgba(99,226,183,0.22) !important;
+  --n-color-pressed: rgba(99,226,183,0.28) !important;
+  --n-color-focus: rgba(99,226,183,0.22) !important;
+}
 .empty { margin-top: 40px; }
 .main { display: flex; flex-direction: column; }
+/* 聊天视图包裹层：v-show 常驻（三态切换不卸载聊天 DOM）。
+   撑满主区并以 flex 列排布子区，消息流 flex:1 内部滚动、输入区钉底 */
+.chat-view { display: flex; flex-direction: column; height: 100%; }
 .chat-head { padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; }
 .hint { color: rgba(255,255,255,0.45); font-size: 13px; }
 .chat-list { flex: 1; overflow-y: auto; padding: 16px 24px; }

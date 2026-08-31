@@ -296,7 +296,7 @@ export class SettingsView {
 }
 
 /**
- * SkillInfo 单个技能的展示元数据（前端技能卡片与介绍弹窗的数据源）。
+ * SkillInfo 单个技能的展示元数据（前端技能视图卡片与详情弹窗的数据源）。
  */
 export class SkillInfo {
     /**
@@ -319,6 +319,16 @@ export class SkillInfo {
              * @type {string}
              */
             this["description"] = "";
+        }
+        if (!("builtin" in $$source)) {
+            /**
+             * Builtin 分类标记：内置/自定义。与 AgentSkillInfo.Builtin 同源
+             * （技能注册表侧 Registry.IsBuiltin），前端只认标记不按名字判断；
+             * 本期全部内置，为下期自定义技能预留。
+             * @member
+             * @type {boolean}
+             */
+            this["builtin"] = false;
         }
         if (!("parameters" in $$source)) {
             /**

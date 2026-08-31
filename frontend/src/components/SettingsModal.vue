@@ -3,7 +3,7 @@
   LLM 与 Docker 连接配置（表单化设计）
      - IP 留空 = 本机 daemon；填了 IP = SSH 远程执行模式
      - "测试 SSH" 直接用输入框当前值测试（未保存也能测）；"保存" 才持久化
-  技能管理已迁出为独立弹窗（SkillManager.vue，侧边栏"技能"按钮入口）。
+  技能管理已迁出为主区视图（SkillManager.vue，侧边栏"技能"按钮切换）。
   父子组件通信：props = 父→子入参；emit = 子→父事件；
   v-model:show 就是两者的组合（父传 :show，子 emit('update:show') 请求关闭）。
 -->

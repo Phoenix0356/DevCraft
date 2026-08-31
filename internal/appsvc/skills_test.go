@@ -44,6 +44,11 @@ func TestListSkills(t *testing.T) {
 		if strings.TrimSpace(s.Description) == "" {
 			t.Errorf("skill %s: description empty", s.Name)
 		}
+		// 分类标记来自注册表侧（本期生产技能全部编译期注册 = 内置）；
+		// 前端卡片凭该字段渲染内置/自定义，不允许缺失
+		if !s.Builtin {
+			t.Errorf("skill %s: Builtin = false, want true", s.Name)
+		}
 		// 参数 Schema 必须是合法 JSON 对象且含 properties（前端按此渲染参数表）
 		var schema map[string]any
 		if err := json.Unmarshal(s.Parameters, &schema); err != nil {

@@ -267,8 +267,9 @@ func (a *App) SetAgentSkills(id string, skillNames []string) error {
 	return svc.SetAgentSkills(id, skillNames)
 }
 
-// ListSkills 全部技能的元数据（名称/描述/参数 Schema，按名排序）。
-// 设置页"技能管理"区的数据源；部署技能的描述为实时动态值（含当前流程清单）。
+// ListSkills 全部技能的元数据（名称/描述/参数 Schema，按名排序），
+// 含内置/自定义分类标记（来自技能注册表侧）。
+// 前端技能管理视图的数据源；部署技能的描述为实时动态值（含当前流程清单）。
 // 前端：ListSkills()
 func (a *App) ListSkills() ([]appsvc.SkillInfo, error) {
 	svc, err := a.svcOrErr()
