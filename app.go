@@ -19,6 +19,7 @@ import (
 	"DevCraft/internal/skill"        // Skill 接口与注册表
 	"DevCraft/internal/skill/deploy" // 一键部署技能（生成待审批单，批准后由 appsvc 执行）
 	"DevCraft/internal/skill/ops"    // 运维域内置技能
+	"DevCraft/internal/skill/pg"     // PostgreSQL 查询域内置技能（只读三件套）
 	"DevCraft/internal/store"        // SQLite 持久层
 )
 
@@ -146,6 +147,18 @@ func buildService(emit appsvc.Emit) (*appsvc.Service, error) {
 	// 依赖方向：deploy 只定义接口，由这里注入实现，无循环依赖。
 	if err := deploy.Register(skills, svc, svc); err != nil {
 		return nil, err
+	}
+	// 8. PostgreSQL 查询技能（只读三件套）：白名单配置回调 PgSkillConfig 与
+	// 查询执行器 PgQuery 都由 svc 注入——技能执行时实时读设置（改配置立即生效），
+	// 连接层由 dbx 强制只读 + 30s 超时（注册范式同 ops/deploy）。
+	if err := pg.Register(skills, svc.PgSkillConfig, svc.PgQuery); err != nil {
+		return nil, err
+	}
+	// 9. 一次性自动补装迁移：把 3 个 pg 技能并集进内置运维 Agent 的装配
+	// （settings 标记 seed.pg_skills_v1 幂等，存量安装升级后自动获得新技能）。
+	// 必须放在技能注册之后：补装的是真实已注册的技能名。
+	if err := svc.MigratePgSkills(); err != nil {
+		return nil, fmt.Errorf("migrate pg skills: %w", err)
 	}
 	return svc, nil
 }
@@ -313,6 +326,36 @@ func (a *App) TestLLM() error {
 		return err
 	}
 	return svc.TestLLM(a.ctx)
+}
+
+// --- PostgreSQL 设置绑定（独立于通用设置：两个 tab 各自保存，互不覆盖）---
+
+// GetPgSettings 读 PG 设置（密码只回传"是否已设置"，绝不回传明文）。
+func (a *App) GetPgSettings() (appsvc.PgSettingsView, error) {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return appsvc.PgSettingsView{}, err
+	}
+	return svc.GetPgSettings()
+}
+
+// SavePgSettings 保存 PG 设置；password 为空字符串表示"保持原值不变"（同 apiKey 语义）。
+func (a *App) SavePgSettings(in appsvc.PgSettings) error {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return err
+	}
+	return svc.SavePgSettings(in)
+}
+
+// TestPg 用表单当前值测试 PG 连接（未保存也能测，对照 TestSSH）；
+// password 留空则用已保存的密码。成功/失败均由前端展示中文提示。
+func (a *App) TestPg(host string, port int, user, password string) error {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return err
+	}
+	return svc.TestPg(a.ctx, host, port, user, password)
 }
 
 // --- 一键部署绑定（流程 CRUD + 审批）---

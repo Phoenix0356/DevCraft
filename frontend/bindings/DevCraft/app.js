@@ -69,12 +69,22 @@ export function GetMessages(sessionID) {
 }
 
 /**
+ * GetPgSettings 读 PG 设置（密码只回传"是否已设置"，绝不回传明文）。
+ * @returns {$CancellablePromise<appsvc$0.PgSettingsView>}
+ */
+export function GetPgSettings() {
+    return $Call.ByID(2053575403).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType2($result);
+    }));
+}
+
+/**
  * GetSettings 读设置（API Key 只回传"是否已设置"，绝不回传明文）。
  * @returns {$CancellablePromise<appsvc$0.SettingsView>}
  */
 export function GetSettings() {
     return $Call.ByID(2554697378).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType2($result);
+        return $$createType3($result);
     }));
 }
 
@@ -84,7 +94,7 @@ export function GetSettings() {
  */
 export function ListAgents() {
     return $Call.ByID(578673379).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType4($result);
+        return $$createType5($result);
     }));
 }
 
@@ -95,7 +105,7 @@ export function ListAgents() {
  */
 export function ListAgentsDetail() {
     return $Call.ByID(655126258).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType6($result);
+        return $$createType7($result);
     }));
 }
 
@@ -105,7 +115,7 @@ export function ListAgentsDetail() {
  */
 export function ListDeployFlows() {
     return $Call.ByID(1498518071).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType8($result);
+        return $$createType9($result);
     }));
 }
 
@@ -115,7 +125,7 @@ export function ListDeployFlows() {
  */
 export function ListSessions() {
     return $Call.ByID(827108744).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType10($result);
+        return $$createType11($result);
     }));
 }
 
@@ -128,7 +138,7 @@ export function ListSessions() {
  */
 export function ListSkills() {
     return $Call.ByID(1140726611).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType12($result);
+        return $$createType13($result);
     }));
 }
 
@@ -138,7 +148,7 @@ export function ListSkills() {
  */
 export function NewSession() {
     return $Call.ByID(2850677243).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType9($result);
+        return $$createType10($result);
     }));
 }
 
@@ -171,6 +181,15 @@ export function SaveAgent(id, name, model, systemPrompt) {
  */
 export function SaveDeployFlow(flow) {
     return $Call.ByID(2911112271, flow);
+}
+
+/**
+ * SavePgSettings 保存 PG 设置；password 为空字符串表示"保持原值不变"（同 apiKey 语义）。
+ * @param {appsvc$0.PgSettings} $in
+ * @returns {$CancellablePromise<void>}
+ */
+export function SavePgSettings($in) {
+    return $Call.ByID(615614664, $in);
 }
 
 /**
@@ -224,6 +243,19 @@ export function TestLLM() {
 }
 
 /**
+ * TestPg 用表单当前值测试 PG 连接（未保存也能测，对照 TestSSH）；
+ * password 留空则用已保存的密码。成功/失败均由前端展示中文提示。
+ * @param {string} host
+ * @param {number} port
+ * @param {string} user
+ * @param {string} password
+ * @returns {$CancellablePromise<void>}
+ */
+export function TestPg(host, port, user, password) {
+    return $Call.ByID(2476333152, host, port, user, password);
+}
+
+/**
  * TestSSH 用表单当前值测试连接（IP 留空测本机；否则 SSH 登录远端执行 docker version）。
  * @param {string} ip
  * @param {string} port
@@ -238,14 +270,15 @@ export function TestSSH(ip, port, user, password) {
 // Private type creation functions
 const $$createType0 = store$0.Message.createFrom;
 const $$createType1 = $Create.Array($$createType0);
-const $$createType2 = appsvc$0.SettingsView.createFrom;
-const $$createType3 = store$0.AgentRow.createFrom;
-const $$createType4 = $Create.Array($$createType3);
-const $$createType5 = appsvc$0.AgentDetail.createFrom;
-const $$createType6 = $Create.Array($$createType5);
-const $$createType7 = store$0.DeployFlow.createFrom;
-const $$createType8 = $Create.Array($$createType7);
-const $$createType9 = store$0.Session.createFrom;
-const $$createType10 = $Create.Array($$createType9);
-const $$createType11 = appsvc$0.SkillInfo.createFrom;
-const $$createType12 = $Create.Array($$createType11);
+const $$createType2 = appsvc$0.PgSettingsView.createFrom;
+const $$createType3 = appsvc$0.SettingsView.createFrom;
+const $$createType4 = store$0.AgentRow.createFrom;
+const $$createType5 = $Create.Array($$createType4);
+const $$createType6 = appsvc$0.AgentDetail.createFrom;
+const $$createType7 = $Create.Array($$createType6);
+const $$createType8 = store$0.DeployFlow.createFrom;
+const $$createType9 = $Create.Array($$createType8);
+const $$createType10 = store$0.Session.createFrom;
+const $$createType11 = $Create.Array($$createType10);
+const $$createType12 = appsvc$0.SkillInfo.createFrom;
+const $$createType13 = $Create.Array($$createType12);

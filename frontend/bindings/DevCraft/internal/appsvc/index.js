@@ -5,6 +5,8 @@
 export {
     AgentDetail,
     AgentSkillInfo,
+    PgSettings,
+    PgSettingsView,
     Settings,
     SettingsView,
     SkillInfo

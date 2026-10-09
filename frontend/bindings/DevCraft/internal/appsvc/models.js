@@ -145,6 +145,160 @@ export class AgentSkillInfo {
 }
 
 /**
+ * PgSettings 前端「数据库配置」tab 提交的表单。
+ * Password 是只写字段（UI → 后端）：留空表示"保持原值不变"，与 apiKey 同款语义。
+ */
+export class PgSettings {
+    /**
+     * Creates a new PgSettings instance.
+     * @param {Partial<PgSettings>} [$$source = {}] - The source object to create the PgSettings.
+     */
+    constructor($$source = {}) {
+        if (!("host" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["host"] = "";
+        }
+        if (!("port" in $$source)) {
+            /**
+             * <=0 时归一化为 5432
+             * @member
+             * @type {number}
+             */
+            this["port"] = 0;
+        }
+        if (!("user" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["user"] = "";
+        }
+        if (!("password" in $$source)) {
+            /**
+             * 只写字段：留空=不修改
+             * @member
+             * @type {string}
+             */
+            this["password"] = "";
+        }
+        if (!("databases" in $$source)) {
+            /**
+             * 关注数据库白名单
+             * @member
+             * @type {string[]}
+             */
+            this["databases"] = [];
+        }
+        if (!("schemas" in $$source)) {
+            /**
+             * 关注 schema 白名单
+             * @member
+             * @type {string[]}
+             */
+            this["schemas"] = [];
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new PgSettings instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {PgSettings}
+     */
+    static createFrom($$source = {}) {
+        const $$createField4_0 = $$createType2;
+        const $$createField5_0 = $$createType2;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("databases" in $$parsedSource) {
+            $$parsedSource["databases"] = $$createField4_0($$parsedSource["databases"]);
+        }
+        if ("schemas" in $$parsedSource) {
+            $$parsedSource["schemas"] = $$createField5_0($$parsedSource["schemas"]);
+        }
+        return new PgSettings(/** @type {Partial<PgSettings>} */($$parsedSource));
+    }
+}
+
+/**
+ * PgSettingsView 返回给前端的 PG 设置视图。
+ * 密码绝不回传明文，只告知"是否已设置"（与 SettingsView.apiKeySet 同一纪律）。
+ */
+export class PgSettingsView {
+    /**
+     * Creates a new PgSettingsView instance.
+     * @param {Partial<PgSettingsView>} [$$source = {}] - The source object to create the PgSettingsView.
+     */
+    constructor($$source = {}) {
+        if (!("host" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["host"] = "";
+        }
+        if (!("port" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["port"] = 0;
+        }
+        if (!("user" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["user"] = "";
+        }
+        if (!("passwordSet" in $$source)) {
+            /**
+             * @member
+             * @type {boolean}
+             */
+            this["passwordSet"] = false;
+        }
+        if (!("databases" in $$source)) {
+            /**
+             * @member
+             * @type {string[]}
+             */
+            this["databases"] = [];
+        }
+        if (!("schemas" in $$source)) {
+            /**
+             * @member
+             * @type {string[]}
+             */
+            this["schemas"] = [];
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new PgSettingsView instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {PgSettingsView}
+     */
+    static createFrom($$source = {}) {
+        const $$createField4_0 = $$createType2;
+        const $$createField5_0 = $$createType2;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("databases" in $$parsedSource) {
+            $$parsedSource["databases"] = $$createField4_0($$parsedSource["databases"]);
+        }
+        if ("schemas" in $$parsedSource) {
+            $$parsedSource["schemas"] = $$createField5_0($$parsedSource["schemas"]);
+        }
+        return new PgSettingsView(/** @type {Partial<PgSettingsView>} */($$parsedSource));
+    }
+}
+
+/**
  * Settings 前端提交的设置表单（apiKey/sshPassword 留空表示不修改）。
  */
 export class Settings {
@@ -358,3 +512,4 @@ export class SkillInfo {
 // Private type creation functions
 const $$createType0 = AgentSkillInfo.createFrom;
 const $$createType1 = $Create.Array($$createType0);
+const $$createType2 = $Create.Array($Create.Any);
