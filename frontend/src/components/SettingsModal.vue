@@ -7,8 +7,8 @@
      - 走独立绑定 GetPgSettings / SavePgSettings / TestPg：
        两个 tab 各自保存，后端字段互不覆盖（这是 PG 设置不并入 SaveSettings 的原因）
      - 密码沿用"已设置则 placeholder 提示、留空不修改"交互（与 API Key 同款语义）
-     - 关注数据库 / 关注 Schema 用 n-dynamic-tags 多值输入（回车或失焦生成标签）；
-       Agent 的 PG 查询技能只能访问白名单内的库和 schema（后端强制）
+     - 关注数据库用 n-dynamic-tags 多值输入（回车或失焦生成标签）；
+       Agent 的 PG 查询技能只能访问白名单内的库（后端强制）
   技能管理已迁出为主区视图（SkillManager.vue，侧边栏"技能"按钮切换）。
   父子组件通信：props = 父→子入参；emit = 子→父事件；
   v-model:show 就是两者的组合（父传 :show，子 emit('update:show') 请求关闭）。
@@ -41,7 +41,7 @@ const testing = ref('')           // 正在测试哪项：'' | 'llm' | 'ssh'（�
 // ---------------- 数据库配置表单（tab ②，PG 专用） ----------------
 const pgForm = ref({
   host: '', port: 5432, user: '', password: '',
-  databases: [], schemas: []
+  databases: []
 })
 const pgPasswordSet = ref(false) // 后端是否已存有 PG 密码（用于占位提示）
 const pgTesting = ref(false)     // "测试连接"按钮 loading
@@ -68,8 +68,7 @@ watch(() => props.show, async (v) => {
     port: p.port || 5432,          // 未配置过端口时用 PG 默认端口
     user: p.user || '',
     password: '',                  // 留空=不修改（后端同款语义）
-    databases: p.databases || [],
-    schemas: p.schemas || []
+    databases: p.databases || []
   }
   pgPasswordSet.value = p.passwordSet
 })
@@ -125,15 +124,14 @@ async function testSSH() {
   }
 }
 
-/** PG 表单载荷（对照 formPayload；databases/schemas 是字符串数组直接透传） */
+/** PG 表单载荷（对照 formPayload；databases 是字符串数组直接透传） */
 function pgPayload() {
   return {
     host: pgForm.value.host,
     port: pgForm.value.port || 5432,
     user: pgForm.value.user,
     password: pgForm.value.password,
-    databases: pgForm.value.databases,
-    schemas: pgForm.value.schemas
+    databases: pgForm.value.databases
   }
 }
 
@@ -242,12 +240,9 @@ async function testPg() {
             <!-- n-dynamic-tags：多值输入（回车/失焦生成标签，点 × 删除），值就是 string[] -->
             <n-dynamic-tags v-model:value="pgForm.databases"/>
           </n-form-item>
-          <n-form-item label="关注 Schema">
-            <n-dynamic-tags v-model:value="pgForm.schemas"/>
-          </n-form-item>
         </n-form>
         <div class="pg-hint">
-          Agent 只能查询「关注数据库 / 关注 Schema」白名单内的数据，且仅允许只读查询（SELECT/WITH）；
+          Agent 只能查询「关注数据库」白名单内的数据，且仅允许只读查询（SELECT/WITH）；
           白名单在后端强制执行，保存后立即生效。
         </div>
         <div class="actions">

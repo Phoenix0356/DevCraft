@@ -34,7 +34,6 @@ const (
 	settingPgUser      = "pg.user"      // 用户名
 	settingPgPassword  = "pg.password"  // 密码（AES-GCM 密文，永不明文落盘）
 	settingPgDatabases = "pg.databases" // 关注数据库白名单（JSON 数组文本）
-	settingPgSchemas   = "pg.schemas"   // 关注 schema 白名单（JSON 数组文本）
 
 	// settingSeedPgSkills 一次性补装迁移的幂等标记：
 	// 存在即表示"pg 技能已补装进运维 Agent"，后续启动直接跳过。
@@ -57,7 +56,6 @@ type PgSettings struct {
 	User      string   `json:"user"`
 	Password  string   `json:"password"`  // 只写字段：留空=不修改
 	Databases []string `json:"databases"` // 关注数据库白名单
-	Schemas   []string `json:"schemas"`   // 关注 schema 白名单
 }
 
 // PgSettingsView 返回给前端的 PG 设置视图。
@@ -68,13 +66,12 @@ type PgSettingsView struct {
 	User        string   `json:"user"`
 	PasswordSet bool     `json:"passwordSet"`
 	Databases   []string `json:"databases"`
-	Schemas     []string `json:"schemas"`
 }
 
 // GetPgSettings 读 PG 设置（「数据库配置」tab 打开时调用）。
 func (s *Service) GetPgSettings() (PgSettingsView, error) {
 	// 初始化为默认值/空切片：JS 侧拿到 [] 而不是 null，前端少一层判空
-	view := PgSettingsView{Port: pgDefaultPort, Databases: []string{}, Schemas: []string{}}
+	view := PgSettingsView{Port: pgDefaultPort, Databases: []string{}}
 	if v, ok, err := s.setting(settingPgHost); err != nil {
 		return view, err
 	} else if ok {
@@ -103,11 +100,6 @@ func (s *Service) GetPgSettings() (PgSettingsView, error) {
 	} else {
 		view.Databases = v
 	}
-	if v, err := s.pgStringList(settingPgSchemas); err != nil {
-		return view, err
-	} else {
-		view.Schemas = v
-	}
 	return view, nil
 }
 
@@ -135,9 +127,6 @@ func (s *Service) SavePgSettings(in PgSettings) error {
 	if err := s.setPgStringList(settingPgDatabases, normalizeList(in.Databases)); err != nil {
 		return err
 	}
-	if err := s.setPgStringList(settingPgSchemas, normalizeList(in.Schemas)); err != nil {
-		return err
-	}
 	if in.Password != "" {
 		enc, err := s.box.Encrypt(in.Password)
 		if err != nil {
@@ -148,7 +137,7 @@ func (s *Service) SavePgSettings(in PgSettings) error {
 		}
 	}
 	slog.Info("PG 设置已保存", "host", in.Host, "port", in.Port, "user", in.User,
-		"databases", len(normalizeList(in.Databases)), "schemas", len(normalizeList(in.Schemas)))
+		"databases", len(normalizeList(in.Databases)))
 	return nil
 }
 
@@ -248,12 +237,7 @@ func (s *Service) PgSkillConfig() pg.Config {
 		slog.Error("读取关注数据库列表失败", "err", err)
 		dbs = nil
 	}
-	schemas, err := s.pgStringList(settingPgSchemas)
-	if err != nil {
-		slog.Error("读取关注 schema 列表失败", "err", err)
-		schemas = nil
-	}
-	return pg.Config{Databases: dbs, Schemas: schemas}
+	return pg.Config{Databases: dbs}
 }
 
 // PgQuery 执行一次只读查询（注册 pg 技能时作为 QueryFn 传入）。

@@ -21,7 +21,6 @@ func TestPgSettingsRoundtripEncryption(t *testing.T) {
 		Host: "10.0.0.8", Port: 0, // 未填端口 → 归一化 5432
 		User: "reporter", Password: "pg-secret-123",
 		Databases: []string{"shop", " crm ", ""}, // 含待归一化项：去空白、丢空项
-		Schemas:   []string{"public", "app"},
 	}
 	if err := svc.SavePgSettings(in); err != nil {
 		t.Fatalf("SavePgSettings: %v", err)
@@ -51,9 +50,6 @@ func TestPgSettingsRoundtripEncryption(t *testing.T) {
 	}
 	if !slices.Equal(view.Databases, []string{"shop", "crm"}) {
 		t.Fatalf("Databases = %v, want [shop crm]（去空白丢空项）", view.Databases)
-	}
-	if !slices.Equal(view.Schemas, []string{"public", "app"}) {
-		t.Fatalf("Schemas = %v, want [public app]", view.Schemas)
 	}
 }
 
@@ -166,11 +162,11 @@ func TestPgSkillConfigLive(t *testing.T) {
 		t.Fatalf("初始白名单应为空: %+v", cfg)
 	}
 	if err := svc.SavePgSettings(PgSettings{Host: "h", User: "u",
-		Databases: []string{"shop"}, Schemas: []string{"public"}}); err != nil {
+		Databases: []string{"shop"}}); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	cfg := svc.PgSkillConfig()
-	if !slices.Equal(cfg.Databases, []string{"shop"}) || !slices.Equal(cfg.Schemas, []string{"public"}) {
+	if !slices.Equal(cfg.Databases, []string{"shop"}) {
 		t.Fatalf("保存后配置未即时生效: %+v", cfg)
 	}
 }

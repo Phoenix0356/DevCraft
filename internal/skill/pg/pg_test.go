@@ -29,9 +29,9 @@ func (f *fakeQuery) fn(_ context.Context, database, query string, args []any, li
 	return f.result, f.err
 }
 
-// staticConfig 返回固定的白名单配置。
-func staticConfig(dbs, schemas []string) ConfigFn {
-	return func() Config { return Config{Databases: dbs, Schemas: schemas} }
+// staticConfig 返回固定的数据库白名单配置。
+func staticConfig(dbs []string) ConfigFn {
+	return func() Config { return Config{Databases: dbs} }
 }
 
 // exec 调用技能的 Execute 并把参数打包成 JSON（模拟 LLM 生成的调用参数）。
@@ -182,7 +182,7 @@ func TestCheckReadOnlySQLBypassAttempts(t *testing.T) {
 // 就被拒绝，执行器零触达（不依赖连接层 read-only 兜底才有安全）。
 func TestQueryGateBlocksWriteCTE(t *testing.T) {
 	q := &fakeQuery{result: "x"}
-	s := newQuerySkill(staticConfig([]string{"shop"}, nil), q)
+	s := newQuerySkill(staticConfig([]string{"shop"}), q)
 	_, err := exec(t, s, map[string]any{
 		"db":  "shop",
 		"sql": "WITH d AS (DELETE FROM users RETURNING *) SELECT * FROM d",
@@ -204,7 +204,7 @@ func newQuerySkill(cfg ConfigFn, q *fakeQuery) *queryData {
 // TestQueryWhitelist db 不在关注列表内必须拒绝（中文说明含可用列表），且绝不触达执行器。
 func TestQueryWhitelist(t *testing.T) {
 	q := &fakeQuery{result: "（0 行）"}
-	s := newQuerySkill(staticConfig([]string{"shop", "crm"}, []string{"public"}), q)
+	s := newQuerySkill(staticConfig([]string{"shop", "crm"}), q)
 
 	_, err := exec(t, s, map[string]any{"db": "secret_db", "sql": "SELECT 1"})
 	if err == nil {
@@ -218,7 +218,7 @@ func TestQueryWhitelist(t *testing.T) {
 	}
 
 	// 未配置任何关注库：提示先配置
-	s2 := newQuerySkill(staticConfig(nil, nil), &fakeQuery{})
+	s2 := newQuerySkill(staticConfig(nil), &fakeQuery{})
 	_, err = exec(t, s2, map[string]any{"db": "shop", "sql": "SELECT 1"})
 	if err == nil || !strings.Contains(err.Error(), "尚未配置关注数据库") {
 		t.Fatalf("err = %v, want 尚未配置关注数据库", err)
@@ -247,7 +247,7 @@ func TestQueryLimitClamp(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			q := &fakeQuery{result: "（0 行）"}
-			s := newQuerySkill(staticConfig([]string{"shop"}, nil), q)
+			s := newQuerySkill(staticConfig([]string{"shop"}), q)
 			args := map[string]any{"db": "shop", "sql": "SELECT 1"}
 			if c.limit != nil {
 				args["limit"] = c.limit
@@ -265,7 +265,7 @@ func TestQueryLimitClamp(t *testing.T) {
 // TestQueryGateBeforeExecution 非只读 SQL 在执行前被拦截（执行器零调用）。
 func TestQueryGateBeforeExecution(t *testing.T) {
 	q := &fakeQuery{result: "x"}
-	s := newQuerySkill(staticConfig([]string{"shop"}, nil), q)
+	s := newQuerySkill(staticConfig([]string{"shop"}), q)
 	_, err := exec(t, s, map[string]any{"db": "shop", "sql": "SELECT 1; DROP TABLE users"})
 	if err == nil || !strings.Contains(err.Error(), "单条 SQL 语句") {
 		t.Fatalf("err = %v, want multi-statement rejection", err)
@@ -278,7 +278,7 @@ func TestQueryGateBeforeExecution(t *testing.T) {
 // TestQueryOutputCap 输出字符总量封顶（≈ ops 的 MaxLogChars），截断在尾部注明。
 func TestQueryOutputCap(t *testing.T) {
 	q := &fakeQuery{result: strings.Repeat("数", MaxOutputChars+5000)}
-	s := newQuerySkill(staticConfig([]string{"shop"}, nil), q)
+	s := newQuerySkill(staticConfig([]string{"shop"}), q)
 	out, err := exec(t, s, map[string]any{"db": "shop", "sql": "SELECT 1"})
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -293,22 +293,13 @@ func TestQueryOutputCap(t *testing.T) {
 
 // ==================== pg_list_tables / pg_describe_table ====================
 
-// TestListTablesSchemaWhitelist schema 参数（如提供）必须在关注 schema 列表内；
-// 未提供 schema 时不加过滤条件（列出全部非系统 schema）。
-func TestListTablesSchemaWhitelist(t *testing.T) {
+// TestListTablesSchemaFilter schema 参数（如提供）作为目录过滤条件参数化传入
+// （不做白名单校验）；未提供 schema 时不加过滤条件（列出全部非系统 schema）。
+func TestListTablesSchemaFilter(t *testing.T) {
 	q := &fakeQuery{result: " schema | name\n"}
-	s := &listTables{base: base{cfg: staticConfig([]string{"shop"}, []string{"public", "app"}), query: q.fn}}
+	s := &listTables{base: base{cfg: staticConfig([]string{"shop"}), query: q.fn}}
 
-	// 越界 schema 拒绝且不触达执行器
-	_, err := exec(t, s, map[string]any{"db": "shop", "schema": "pg_hack"})
-	if err == nil || !strings.Contains(err.Error(), "不在关注列表内") {
-		t.Fatalf("err = %v, want schema whitelist rejection", err)
-	}
-	if q.calls != 0 {
-		t.Fatal("越界 schema 触达了执行器")
-	}
-
-	// 合法 schema：参数化传入（$1），绝不拼接进 SQL 文本
+	// 提供 schema：参数化传入（$1），绝不拼接进 SQL 文本
 	if _, err := exec(t, s, map[string]any{"db": "shop", "schema": "app"}); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -324,7 +315,7 @@ func TestListTablesSchemaWhitelist(t *testing.T) {
 
 	// 未提供 schema：SQL 不带过滤条件
 	q2 := &fakeQuery{result: "x"}
-	s2 := &listTables{base: base{cfg: staticConfig([]string{"shop"}, nil), query: q2.fn}}
+	s2 := &listTables{base: base{cfg: staticConfig([]string{"shop"}), query: q2.fn}}
 	if _, err := exec(t, s2, map[string]any{"db": "shop"}); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -335,18 +326,12 @@ func TestListTablesSchemaWhitelist(t *testing.T) {
 
 // TestDescribeTableValidation schema 必填、table 必填、空结果给可行动提示。
 func TestDescribeTableValidation(t *testing.T) {
-	cfg := staticConfig([]string{"shop"}, []string{"public"})
-
-	// schema 参数在关注列表之外 → 拒绝（即使配置了 schema 白名单）
-	q := &fakeQuery{}
-	s := &describeTable{base: base{cfg: cfg, query: q.fn}}
-	_, err := exec(t, s, map[string]any{"db": "shop", "schema": "other", "table": "t"})
-	if err == nil || !strings.Contains(err.Error(), "不在关注列表内") {
-		t.Fatalf("err = %v, want schema whitelist rejection", err)
-	}
+	cfg := staticConfig([]string{"shop"})
 
 	// 缺 schema → 中文提示必填（describe 需要精确定位表）
-	_, err = exec(t, s, map[string]any{"db": "shop", "table": "t"})
+	q := &fakeQuery{}
+	s := &describeTable{base: base{cfg: cfg, query: q.fn}}
+	_, err := exec(t, s, map[string]any{"db": "shop", "table": "t"})
 	if err == nil || !strings.Contains(err.Error(), "需要提供 schema") {
 		t.Fatalf("err = %v, want missing-schema wording", err)
 	}
@@ -376,7 +361,7 @@ func TestDescribeTableValidation(t *testing.T) {
 func TestRegisterAndMetadata(t *testing.T) {
 	reg := skill.NewRegistry()
 	q := &fakeQuery{}
-	if err := Register(reg, staticConfig([]string{"shop"}, []string{"public"}), q.fn); err != nil {
+	if err := Register(reg, staticConfig([]string{"shop"}), q.fn); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	for _, name := range SkillNames {

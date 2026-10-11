@@ -6,8 +6,8 @@
 //     必须是单语句（分号后仍有内容即拒绝），且字面量挖空后的代码骨架里
 //     不得出现写关键字（拦截 WITH 内藏数据修改 CTE 与 SELECT INTO 建表）
 //     ——见 checkReadOnlySQL；
-//  2. 白名单：db 必须在用户配置的"关注数据库"内，schema 参数（如提供）
-//     必须在"关注 schema"内，越界一律中文拒绝；
+//  2. 白名单：db 必须在用户配置的"关注数据库"内，越界一律中文拒绝
+//     （schema 参数不做白名单校验，仅用于目录查询过滤/定位表）；
 //  3. 体量防护：行数截断到 limit（默认 200 / 上限 1000）+ 输出字符总量
 //     封顶（对照 ops.analyze_logs 的 MaxLogChars 范式）。
 //     连接层还有第二道只读保险（dbx 的 SET default_transaction_read_only）。
@@ -45,11 +45,10 @@ const (
 	MaxOutputChars  = 20000 // 输出字符总量上限（控制 token 成本的兜底）
 )
 
-// Config 技能可见的 PG 配置子集（白名单）。连接凭据不在这里——
+// Config 技能可见的 PG 配置子集（数据库白名单）。连接凭据不在这里——
 // 技能不需要知道密码，执行查询由注入的 QueryFn 负责（最小知识原则）。
 type Config struct {
 	Databases []string // 关注数据库白名单（pg.databases）
-	Schemas   []string // 关注 schema 白名单（pg.schemas）
 }
 
 // ConfigFn 实时读取当前配置（≈ ops.EndpointFn：用回调而非快照，改设置立即生效）。
@@ -100,39 +99,14 @@ func (b base) checkDb(db string) (string, error) {
 	return "", fmt.Errorf("数据库 %q 不在关注列表内（可用: %s），已拒绝执行", db, strings.Join(c.Databases, ", "))
 }
 
-// checkSchema 校验可选的 schema 参数。
-// 返回 (schema, 是否提供, 错误)：未提供不报错（调用方自行决定 schema 是否必填）。
-func (b base) checkSchema(schema string) (string, bool, error) {
-	schema = strings.TrimSpace(schema)
-	if schema == "" {
-		return "", false, nil
-	}
-	c := b.cfg()
-	if len(c.Schemas) == 0 {
-		return "", false, fmt.Errorf("schema %q 不在关注列表内（当前未配置任何关注 schema），已拒绝执行：请引导用户在设置 →「数据库配置」中添加", schema)
-	}
-	for _, s := range c.Schemas {
-		if s == schema {
-			return schema, true, nil
-		}
-	}
-	return "", false, fmt.Errorf("schema %q 不在关注列表内（可用: %s），已拒绝执行", schema, strings.Join(c.Schemas, ", "))
-}
-
 // whitelistHint 动态拼进 Description 的白名单说明（对照 deploy 技能的动态流程清单：
 // Description 每回合实时读取，配置变更下一轮对话即生效，帮 LLM 传对参数）。
 func (b base) whitelistHint() string {
 	c := b.cfg()
-	var parts []string
 	if len(c.Databases) > 0 {
-		parts = append(parts, "关注数据库: "+strings.Join(c.Databases, ", "))
-	} else {
-		parts = append(parts, "关注数据库: （尚未配置——调用会被拒绝，请引导用户先在设置 →「数据库配置」中添加）")
+		return "\n当前配置——关注数据库: " + strings.Join(c.Databases, ", ") + "。"
 	}
-	if len(c.Schemas) > 0 {
-		parts = append(parts, "关注 schema: "+strings.Join(c.Schemas, ", "))
-	}
-	return "\n当前配置——" + strings.Join(parts, "；") + "。"
+	return "\n当前配置——关注数据库: （尚未配置——调用会被拒绝，请引导用户先在设置 →「数据库配置」中添加）。"
 }
 
 // ==================== SQL 只读门禁 ====================
@@ -292,11 +266,11 @@ type listTables struct{ base }
 func (s *listTables) Name() string { return SkillListTables }
 
 // Description 直接决定 LLM 的路由判断（对照 ops 技能的写法），
-// 尾部动态拼接当前白名单，帮模型传对 db/schema 参数。
+// 尾部动态拼接当前数据库白名单，帮模型传对 db 参数。
 func (s *listTables) Description() string {
 	return "查询 PostgreSQL 数据库中有哪些表（含 schema、表类型与表注释）。" +
 		"当用户想了解某个数据库有哪些表、浏览库里的数据对象时使用；" +
-		"写数据查询前也建议先用本技能了解结构。仅限查询关注列表内的数据库与 schema。" +
+		"写数据查询前也建议先用本技能了解结构。仅限查询关注列表内的数据库。" +
 		s.whitelistHint()
 }
 
@@ -305,7 +279,7 @@ func (s *listTables) Parameters() json.RawMessage {
 		"type":"object",
 		"properties":{
 			"db":{"type":"string","description":"数据库名（必须在关注数据库列表内）"},
-			"schema":{"type":"string","description":"schema 名（可选；提供则必须在关注 schema 列表内，缺省列出全部非系统 schema）"}
+			"schema":{"type":"string","description":"schema 名（可选；提供则只列出该 schema，缺省列出全部非系统 schema）"}
 		},
 		"required":["db"],
 		"additionalProperties":false
@@ -313,7 +287,7 @@ func (s *listTables) Parameters() json.RawMessage {
 }
 
 // Execute 查系统目录 pg_catalog（比 information_schema 多拿得到表注释），
-// schema 值一律走 $1 参数化——即使白名单被配置错了也不可能拼出注入。
+// schema 值一律走 $1 参数化——即使传入恶意 schema 名也不可能拼出注入。
 func (s *listTables) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var in struct {
 		Db     string `json:"db"`
@@ -326,10 +300,9 @@ func (s *listTables) Execute(ctx context.Context, args json.RawMessage) (string,
 	if err != nil {
 		return "", err
 	}
-	schema, provided, err := s.checkSchema(in.Schema)
-	if err != nil {
-		return "", err
-	}
+	// schema 是可选过滤条件（不做白名单校验）：提供则只列出该 schema
+	schema := strings.TrimSpace(in.Schema)
+	provided := schema != ""
 	// relkind: r=表 p=分区表 v=视图 m=物化视图 f=外部表；排除系统 schema
 	query := `SELECT n.nspname AS schema, c.relname AS name,
        CASE c.relkind WHEN 'r' THEN 'table' WHEN 'p' THEN 'partitioned' WHEN 'v' THEN 'view'
@@ -376,7 +349,7 @@ func (s *describeTable) Parameters() json.RawMessage {
 		"type":"object",
 		"properties":{
 			"db":{"type":"string","description":"数据库名（必须在关注数据库列表内）"},
-			"schema":{"type":"string","description":"表所在 schema，常见为 public（必须在关注 schema 列表内）"},
+			"schema":{"type":"string","description":"表所在 schema，常见为 public"},
 			"table":{"type":"string","description":"表名"}
 		},
 		"required":["db","schema","table"],
@@ -398,11 +371,9 @@ func (s *describeTable) Execute(ctx context.Context, args json.RawMessage) (stri
 		return "", err
 	}
 	// describe 必须定位到具体 schema（同名表可能存在于多个 schema），schema 必填
-	schema, provided, err := s.checkSchema(in.Schema)
-	if err != nil {
-		return "", err
-	}
-	if !provided {
+	// （不做白名单校验，值走 $1 参数化）
+	schema := strings.TrimSpace(in.Schema)
+	if schema == "" {
 		return "", fmt.Errorf("参数错误: 需要提供 schema（表所在模式名，常见为 public）")
 	}
 	table := strings.TrimSpace(in.Table)

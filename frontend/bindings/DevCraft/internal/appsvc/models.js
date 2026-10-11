@@ -192,14 +192,6 @@ export class PgSettings {
              */
             this["databases"] = [];
         }
-        if (!("schemas" in $$source)) {
-            /**
-             * 关注 schema 白名单
-             * @member
-             * @type {string[]}
-             */
-            this["schemas"] = [];
-        }
 
         Object.assign(this, $$source);
     }
@@ -211,13 +203,9 @@ export class PgSettings {
      */
     static createFrom($$source = {}) {
         const $$createField4_0 = $$createType2;
-        const $$createField5_0 = $$createType2;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("databases" in $$parsedSource) {
             $$parsedSource["databases"] = $$createField4_0($$parsedSource["databases"]);
-        }
-        if ("schemas" in $$parsedSource) {
-            $$parsedSource["schemas"] = $$createField5_0($$parsedSource["schemas"]);
         }
         return new PgSettings(/** @type {Partial<PgSettings>} */($$parsedSource));
     }
@@ -268,13 +256,6 @@ export class PgSettingsView {
              */
             this["databases"] = [];
         }
-        if (!("schemas" in $$source)) {
-            /**
-             * @member
-             * @type {string[]}
-             */
-            this["schemas"] = [];
-        }
 
         Object.assign(this, $$source);
     }
@@ -286,13 +267,9 @@ export class PgSettingsView {
      */
     static createFrom($$source = {}) {
         const $$createField4_0 = $$createType2;
-        const $$createField5_0 = $$createType2;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("databases" in $$parsedSource) {
             $$parsedSource["databases"] = $$createField4_0($$parsedSource["databases"]);
-        }
-        if ("schemas" in $$parsedSource) {
-            $$parsedSource["schemas"] = $$createField5_0($$parsedSource["schemas"]);
         }
         return new PgSettingsView(/** @type {Partial<PgSettingsView>} */($$parsedSource));
     }
