@@ -2,6 +2,7 @@ package appsvc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -276,5 +277,188 @@ func TestTurnErrTextClassification(t *testing.T) {
 		if got := turnErrText(c.err); got != c.want {
 			t.Fatalf("%s: turnErrText = %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// ==================== /技能名 软路由（parseSkillPrefix + 注入） ====================
+
+// stubSkill 测试用最小技能实现（只需要"存在于注册表"，不会被真正执行——
+// 软路由只注入指令，工具调用由 LLM 决定，测试里的假 LLM 直接返回文本）。
+type stubSkill struct{ name string }
+
+func (s stubSkill) Name() string                                             { return s.name }
+func (s stubSkill) Description() string                                      { return "测试技能" }
+func (s stubSkill) Parameters() json.RawMessage                              { return json.RawMessage(`{}`) }
+func (s stubSkill) Execute(context.Context, json.RawMessage) (string, error) { return "ok", nil }
+
+// recordingLLM 记录每次收到的消息序列（断言注入形态），立即返回固定回答。
+type recordingLLM struct {
+	mu       sync.Mutex
+	requests [][]llm.Message
+	answer   string
+}
+
+func (r *recordingLLM) ChatStream(_ context.Context, _ string, msgs []llm.Message, _ []llm.ToolSpec, onDelta func(string) error) (*llm.Response, error) {
+	r.mu.Lock()
+	r.requests = append(r.requests, append([]llm.Message(nil), msgs...))
+	r.mu.Unlock()
+	if onDelta != nil {
+		_ = onDelta(r.answer)
+	}
+	return &llm.Response{Message: llm.Message{Role: llm.RoleAssistant, Content: r.answer}}, nil
+}
+
+// lastUserContent 最近一次请求里最后一条 user 消息的内容（= 本轮发给 LLM 的用户消息）。
+func (r *recordingLLM) lastUserContent(t *testing.T) string {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.requests) == 0 {
+		t.Fatal("recordingLLM received no requests")
+	}
+	msgs := r.requests[len(r.requests)-1]
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == llm.RoleUser {
+			return msgs[i].Content
+		}
+	}
+	t.Fatal("no user message in recorded request")
+	return ""
+}
+
+// TestParseSkillPrefix 解析规则与 parseAgentPrefix 镜像：
+// 行首 / 触发、必须有空白分隔的正文、名字取第一段、正文 TrimSpace。
+func TestParseSkillPrefix(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		wantName string
+		wantRest string
+		wantOK   bool
+	}{
+		{"正常", "/pg_query 查 papers 前 10 条", "pg_query", "查 papers 前 10 条", true},
+		{"无正文", "/pg_query", "", "", false},
+		{"仅空白正文", "/pg_query \t\n", "pg_query", "", true}, // 调用方 SendMessage 先 TrimSpace，实际到不了这个形态
+		{"名字前无正文", "/ 查日志", "", "", false},
+		{"多空格分隔", "/pg_query    查   日志", "pg_query", "查   日志", true},
+		{"制表符分隔", "/pg_query\t查日志", "pg_query", "查日志", true},
+		{"换行分隔", "/pg_query\n查日志", "pg_query", "查日志", true},
+		{"中文正文", "/ops_demo 把服务部署到生产环境并验证", "ops_demo", "把服务部署到生产环境并验证", true},
+		{"非行首触发", "请 /pg_query 查日志", "", "", false},
+		{"@ 前缀不命中", "@运维 查日志", "", "", false},
+		{"空串", "", "", "", false},
+	}
+	for _, c := range cases {
+		name, rest, ok := parseSkillPrefix(c.in)
+		if ok != c.wantOK || name != c.wantName || rest != c.wantRest {
+			t.Errorf("%s: parseSkillPrefix(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				c.name, c.in, name, rest, ok, c.wantName, c.wantRest, c.wantOK)
+		}
+	}
+}
+
+// TestSendMessageSkillInjection 软路由命中路径：技能存在于注册表 →
+// 入库/展示为去前缀的正文（与 @ 前缀存储语义对齐），发给 LLM 的用户消息
+// 带"【用户指定】"注入指令（仅本轮，不入库）。当前 Agent（bare）未装配
+// 该技能也照常注入不拦截（PRD 决策：LLM 无工具时自然降级）。
+func TestSendMessageSkillInjection(t *testing.T) {
+	withTurnTimeout(t, 5*time.Second)
+	svc := newTestService(t)
+	if err := svc.skills.Register(stubSkill{name: "demo_query"}); err != nil {
+		t.Fatalf("register stub skill: %v", err)
+	}
+	rec := &recordingLLM{answer: "ok"}
+	svc.newLLM = func(string, string) llm.Client { return rec }
+	sess := newBareSession(t, svc)
+
+	if err := svc.SendMessage(context.Background(), sess.ID, "/demo_query  查 papers 前 10 条"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	// 发给 LLM 的用户消息 = 注入指令 + 正文
+	wantLLM := "【用户指定】请优先使用技能 demo_query 完成以下请求：\n查 papers 前 10 条"
+	if got := rec.lastUserContent(t); got != wantLLM {
+		t.Fatalf("LLM user message = %q, want %q", got, wantLLM)
+	}
+	// 入库的是去前缀正文（注入文本不落库）
+	msgs, err := svc.Messages(sess.ID)
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	if len(msgs) < 1 || msgs[0].Content != "查 papers 前 10 条" {
+		t.Fatalf("stored user message = %+v, want content 查 papers 前 10 条", msgs[0])
+	}
+	// 会话标题也用去前缀正文
+	if s, err := svc.store.GetSession(sess.ID); err != nil || s.Title != "查 papers 前 10 条" {
+		t.Fatalf("session title = %q (err %v), want 查 papers 前 10 条", s.Title, err)
+	}
+}
+
+// TestSendMessageSkillFailOpen fail-open 路径：技能不存在 / 无正文 →
+// 按普通文本原样入库、原样发给 LLM，不报错。
+func TestSendMessageSkillFailOpen(t *testing.T) {
+	withTurnTimeout(t, 5*time.Second)
+	svc := newTestService(t)
+	if err := svc.skills.Register(stubSkill{name: "demo_query"}); err != nil {
+		t.Fatalf("register stub skill: %v", err)
+	}
+	rec := &recordingLLM{answer: "ok"}
+	svc.newLLM = func(string, string) llm.Client { return rec }
+
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"技能不存在", "/no_such_skill 查日志"},
+		{"无正文", "/demo_query"},
+		{"非行首触发", "请 /demo_query 查日志"},
+	}
+	for _, c := range cases {
+		sess := newBareSession(t, svc)
+		if err := svc.SendMessage(context.Background(), sess.ID, c.in); err != nil {
+			t.Fatalf("%s: SendMessage: %v", c.name, err)
+		}
+		if got := rec.lastUserContent(t); got != c.in {
+			t.Errorf("%s: LLM user message = %q, want %q（原样发送）", c.name, got, c.in)
+		}
+		msgs, err := svc.Messages(sess.ID)
+		if err != nil {
+			t.Fatalf("%s: Messages: %v", c.name, err)
+		}
+		if msgs[0].Content != c.in {
+			t.Errorf("%s: stored user message = %q, want %q（原样入库）", c.name, msgs[0].Content, c.in)
+		}
+	}
+	if errs := doneErrsHook(); len(errs) != 0 {
+		t.Fatalf("unexpected done errors: %v", errs)
+	}
+}
+
+// TestSendMessageAgentThenSkillPrefix 组合路径："@Agent /技能 正文" →
+// ① @ 路由先切 Agent，①' 软路由再解析 / 前缀；两级前缀都被剥离，
+// 入库只剩正文，LLM 收到注入指令。
+func TestSendMessageAgentThenSkillPrefix(t *testing.T) {
+	withTurnTimeout(t, 5*time.Second)
+	svc := newTestService(t)
+	if err := svc.skills.Register(stubSkill{name: "demo_query"}); err != nil {
+		t.Fatalf("register stub skill: %v", err)
+	}
+	rec := &recordingLLM{answer: "ok"}
+	svc.newLLM = func(string, string) llm.Client { return rec }
+	sess := newBareSession(t, svc)
+
+	if err := svc.SendMessage(context.Background(), sess.ID, "@bare /demo_query 查日志"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	wantLLM := "【用户指定】请优先使用技能 demo_query 完成以下请求：\n查日志"
+	if got := rec.lastUserContent(t); got != wantLLM {
+		t.Fatalf("LLM user message = %q, want %q", got, wantLLM)
+	}
+	msgs, err := svc.Messages(sess.ID)
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	if msgs[0].Content != "查日志" {
+		t.Fatalf("stored user message = %q, want 查日志", msgs[0].Content)
 	}
 }

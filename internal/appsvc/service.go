@@ -433,6 +433,18 @@ func (s *Service) SendMessage(ctx context.Context, sessionID, text string) error
 		}
 		// 匹配失败时静默忽略前缀，走默认 Agent（容错）
 	}
+	// ①' /技能名 软路由："/pg_query 查 papers" → 技能存在于注册表则命中。
+	// 入库/展示与 @ 前缀完全对齐：去掉前缀只存正文；发给 LLM 的用户消息
+	// 换成带"优先使用该技能"指令的版本（skillHint，仅本轮生效、不入库）。
+	// fail-open：技能不存在 / 无正文 / 格式不符 → 按普通文本原样发送，不报错。
+	// 技能未装配进当前 Agent 也照常注入不拦截：LLM 无该工具时自然降级为普通对话。
+	skillHint := ""
+	if name, rest, ok := parseSkillPrefix(text); ok {
+		if _, exists := s.skills.Get(name); exists {
+			text = rest
+			skillHint = fmt.Sprintf("【用户指定】请优先使用技能 %s 完成以下请求：\n%s", name, rest)
+		}
+	}
 	// ② 无前缀则使用会话绑定的 Agent（sess.AgentID）
 
 	// 用户消息落库
@@ -465,6 +477,13 @@ func (s *Service) SendMessage(ctx context.Context, sessionID, text string) error
 	history, err := s.buildHistory(sessionID)
 	if err != nil {
 		return err
+	}
+	// 软路由注入只影响本轮 LLM 请求：把刚入库的本轮用户消息替换成带指令版本
+	// （库里存的仍是不带前缀的正文，与 @ 前缀的存储语义完全一致）。
+	if skillHint != "" && len(history) > 0 {
+		if last := &history[len(history)-1]; last.Role == llm.RoleUser && last.Content == text {
+			last.Content = skillHint
+		}
 	}
 
 	// 每回合新建 Runner（LLM 客户端按当前配置现造，改设置立即生效）。
@@ -537,6 +556,21 @@ func parseAgentPrefix(text string) (prefix, rest string, ok bool) {
 	body := text[1:]
 	idx := strings.IndexAny(body, " \t\n") // 找第一个空白作为前缀结束
 	if idx <= 0 {                          // "@运维"（无正文）不算有效指令
+		return "", "", false
+	}
+	return body[:idx], strings.TrimSpace(body[idx+1:]), true
+}
+
+// parseSkillPrefix 解析 "/技能名 正文" 形式的软路由前缀（镜像 parseAgentPrefix）。
+// 返回 (技能名, 剩余正文, 是否匹配)。例如 "/pg_query 查 papers" → ("pg_query", "查 papers", true)。
+// 只负责格式解析；技能名是否存在于注册表由调用方校验（不存在则 fail-open 按普通文本走）。
+func parseSkillPrefix(text string) (name, rest string, ok bool) {
+	if !strings.HasPrefix(text, "/") {
+		return "", "", false
+	}
+	body := text[1:]
+	idx := strings.IndexAny(body, " \t\n") // 找第一个空白作为前缀结束
+	if idx <= 0 {                          // "/pg_query"（无正文）不算有效指令
 		return "", "", false
 	}
 	return body[:idx], strings.TrimSpace(body[idx+1:]), true

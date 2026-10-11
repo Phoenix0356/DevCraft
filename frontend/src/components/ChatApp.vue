@@ -29,8 +29,8 @@ import {JSONStream} from '@wailsio/runtime'
 // 自动生成的 Go 方法桩（≈ OpenAPI 客户端）：每个函数对应 app.go 里的一个导出方法。
 // 由 `wails3 generate bindings` 生成，勿手改。
 import {
-  NewSession, ListSessions, DeleteSession, SetSessionAgent, GetMessages,
-  SendMessage, CancelTurn, ListAgents, ApproveDeployment, RejectDeployment
+  NewSession, ListSessions, DeleteSession, GetMessages,
+  SendMessage, CancelTurn, ListAgents, ListAgentsDetail, ApproveDeployment, RejectDeployment
 } from '../../bindings/DevCraft/app.js'
 
 import {renderMarkdown} from '../lib/markdown'     // Markdown → HTML
@@ -55,6 +55,9 @@ const listRef = ref(null)             // 消息列表 DOM 引用（模板里 ref
 
 // 当前会话绑定的 Agent id（computed：currentSession 变则自动重算）
 const currentAgentId = computed(() => currentSession.value?.agentId || '')
+// 当前会话 Agent 的显示名：头部下拉框移除后改为只读文字展示，切换靠消息里的 @ 路由
+const currentAgentName = computed(() =>
+  agents.value.find(a => a.id === currentAgentId.value)?.name || '')
 // ?. 是可选链：currentSession 为 null 时不报错直接得 undefined（≈ Java 的 Optional.map）
 
 // ---------------- 卡死防御：停止按钮 + 前端看门狗 ----------------
@@ -223,6 +226,141 @@ async function loadAgents() {
   agents.value = (await ListAgents()) || []
 }
 
+// ---------------- 输入建议浮层（/ 触发技能软路由、@ 触发智能体强制路由）----------------
+// 触发规则与后端解析对齐：仅当输入首字符是 / 或 @、且触发段尚未出现空白时弹出
+// （后端 parseSkillPrefix / parseAgentPrefix 都要求"行首触发 + 空白分隔正文"）。
+// / 数据源 = 当前会话 Agent 已装配的技能（ListAgentsDetail 明细的 skills，含描述）；
+// @ 数据源 = 全部智能体（agents，头部下拉框同源）。选中只插入前缀文本，
+// 路由本身仍由后端发送时解析——浮层是补全器，不是新链路。
+
+const agentDetails = ref([])         // Agent 明细列表（含已装配技能 name/description）
+const inputRef = ref(null)           // n-input 组件引用（选中后恢复焦点/光标用）
+const suggIndex = ref(0)             // 浮层高亮项下标（↑↓ 循环导航）
+const suggDismissed = ref(false)     // Esc 临时关闭标记（触发段失效后自动复位）
+
+/** 拉取 Agent 明细（/ 浮层数据源）。装配只能在智能体视图里改，
+ *  故挂载时 + 离开智能体视图时刷新即可；失败不阻塞输入（浮层退化为空态）。 */
+async function loadAgentDetails() {
+  try {
+    agentDetails.value = (await ListAgentsDetail()) || []
+  } catch {
+    agentDetails.value = []
+  }
+}
+
+// 当前会话 Agent 已装配的技能（computed：会话切换 / Agent 变更后自动跟随）
+const currentAgentSkills = computed(() => {
+  const d = agentDetails.value.find(a => a.id === currentAgentId.value)
+  return d?.skills || []
+})
+
+// 触发解析：行首触发符 + 触发段（\S* 保证段内无空白；输入正文后浮层自动关闭）
+const suggTrigger = computed(() => {
+  const m = /^([/@])(\S*)$/.exec(input.value)
+  if (!m) return null
+  return {kind: m[1] === '/' ? 'skill' : 'agent', query: m[2].toLowerCase()}
+})
+
+// 过滤后的建议条目：名字/描述模糊匹配（不区分大小写；@ 智能体附带匹配 id）
+const suggItems = computed(() => {
+  const trig = suggTrigger.value
+  if (!trig) return []
+  const hit = (s) => !trig.query || (s || '').toLowerCase().includes(trig.query)
+  if (trig.kind === 'skill') {
+    return currentAgentSkills.value.filter(s => hit(s.name) || hit(s.description))
+  }
+  return agents.value.filter(a => hit(a.name) || hit(a.id))
+})
+
+// 浮层可见 = 触发段有效且未被 Esc 关闭
+const suggVisible = computed(() => !!suggTrigger.value && !suggDismissed.value)
+
+// 空列表提示文案（不阻塞输入：此时 Enter 仍是发送）
+const suggEmptyText = computed(() => {
+  const trig = suggTrigger.value
+  if (!trig) return ''
+  if (trig.kind === 'skill') return currentAgentSkills.value.length ? '无匹配技能' : '当前智能体未装配技能'
+  return '无匹配智能体'
+})
+
+// 输入变化：高亮回到第一项；触发段失效（如已选中插入空格）时复位 Esc 关闭标记
+watch(input, () => {
+  suggIndex.value = 0
+  if (!suggTrigger.value) suggDismissed.value = false
+})
+
+// 列表异步变化（Agent 明细刷新等）导致条目数收缩时，高亮下标可能越界——
+// 越界后 items[suggIndex] 为 undefined，Enter/Tab 会静默失灵，故在此复位
+watch(suggItems, (items) => {
+  if (suggIndex.value >= items.length) suggIndex.value = 0
+})
+
+// 高亮变化时把条目滚进可视区（浮层内部滚动，键盘导航不丢焦点项）
+watch(suggIndex, () => {
+  if (!suggVisible.value) return
+  nextTick(() => {
+    document.querySelector('.sugg-item.active')?.scrollIntoView({block: 'nearest'})
+  })
+})
+
+/** 选中建议：把行首触发段（如 "/pg"、"@运"）整体替换为 "/技能名 " 或 "@名字 "，
+ *  光标置尾等待输入正文。浮层只在"整段无空白"时打开，故直接整体替换即可。 */
+function selectSuggestion(item) {
+  const trig = suggTrigger.value
+  if (!trig || !item) return
+  input.value = (trig.kind === 'skill' ? '/' : '@') + item.name + ' '
+  nextTick(() => {
+    const el = inputRef.value?.textareaElRef // n-input(type=textarea) 暴露的内部元素
+    if (el) {
+      el.focus()
+      el.setSelectionRange(input.value.length, input.value.length)
+    }
+  })
+}
+
+/** 浮层键盘导航（挂在 n-input 的 keydown 上；Enter 由 onEnterOrSend 单独接管） */
+function onSuggKeydown(e) {
+  if (!suggVisible.value) return
+  const items = suggItems.value
+  switch (e.key) {
+    case 'ArrowDown':
+      e.preventDefault()
+      if (items.length) suggIndex.value = (suggIndex.value + 1) % items.length // 循环
+      break
+    case 'ArrowUp':
+      e.preventDefault()
+      if (items.length) suggIndex.value = (suggIndex.value - 1 + items.length) % items.length
+      break
+    case 'Tab':
+      if (items.length) {
+        e.preventDefault() // 浮层打开时 Tab = 选中，不切换焦点
+        selectSuggestion(items[suggIndex.value])
+      }
+      break
+    case 'Escape':
+      e.preventDefault()
+      suggDismissed.value = true
+      break
+  }
+}
+
+/** Enter（无修饰键）：浮层打开且有可选项时 = 选中建议，绝不触发发送；否则照常发送。
+ *  输入法组合态防御：中文候选词按回车"上屏"时，部分浏览器（Firefox/Safari）会派发
+ *  key=Enter 且 isComposing=true 的 keydown——此时直接放行（不 preventDefault、
+ *  不选中不发送），把回车还给输入法完成上屏；正常路径手动 preventDefault 阻止换行
+ *  （等价于原 .prevent 修饰符——修饰符版会在处理函数之前无条件 prevent，
+ *  组合态就守不住了，故改在函数内按 isComposing 分流）。
+ *  Chromium/WebView2 组合态派发的是 key=Process，本就进不了 .enter 分支，双保险 */
+function onEnterOrSend(e) {
+  if (e?.isComposing || e?.keyCode === 229) return
+  e?.preventDefault() // 阻止 textarea 默认换行（= 原 @keydown.enter.exact.prevent 的语义）
+  if (suggVisible.value && suggItems.value.length) {
+    selectSuggestion(suggItems.value[suggIndex.value])
+    return
+  }
+  send()
+}
+
 // ---------------- 会话操作 ----------------
 
 /** 新建会话并立即打开 */
@@ -262,12 +400,13 @@ async function removeSession(sess) {
   await loadSessions(true)
 }
 
-/** 切换会话绑定的 Agent（头部下拉框变化时触发） */
-async function onAgentChange(agentId) {
+/** @ 前缀路由在后端切掉了会话绑定的 Agent——回合结束后重拉会话列表，
+ *  把本地 currentSession 换成新对象，头部显示与 / 技能建议（都依赖 agentId）才不会停留在旧 Agent */
+async function syncSessionAgent() {
   if (!currentSession.value) return
-  await SetSessionAgent(currentSession.value.id, agentId)
-  currentSession.value = {...currentSession.value, agentId}
-  // {...obj, agentId} = 展开运算符：复制一份对象并覆盖字段（保持响应式更新）
+  sessions.value = (await ListSessions()) || []
+  const fresh = sessions.value.find(s => s.id === currentSession.value.id)
+  if (fresh) currentSession.value = fresh
 }
 
 /** 消息列表滚到底部 */
@@ -317,6 +456,8 @@ async function send() {
     if (mySeq === turnSeq) {
       clearWatchdog()
       sending.value = false
+      // @ 前缀路由在后端切了会话 Agent：回拉同步本地 agentId（先解锁再同步，不阻塞 UI）
+      if (text.startsWith('@')) await syncSessionAgent()
     }
   }
 }
@@ -392,6 +533,7 @@ onMounted(async () => {
   chatStream = JSONStream('chat')
   chatStream.onmessage = onStreamFrame
   await loadAgents()
+  await loadAgentDetails()
   await loadSessions(true)
 })
 
@@ -410,11 +552,15 @@ watch(showSettings, async (v) => {
 })
 
 // 视图切换收尾：回到聊天页滚到底部（离开期间到达的帧未能驱动跟随滚动）；
-// 离开智能体视图后刷新头部下拉的 Agent 列表（名称可能已被编辑；
-// 会话绑定与装配无需处理——会话只存 agentId，Runner 每回合实时读装配）
+// 离开智能体视图后刷新头部下拉的 Agent 列表（名称可能已被编辑）与 Agent 明细
+// （技能装配可能已被修改——/ 建议浮层的数据源）；
+// 会话绑定无需处理——会话只存 agentId，Runner 每回合实时读装配
 watch(view, (v, oldV) => {
   if (v === 'chat') nextTick(scrollToBottom)
-  if (oldV === 'agents' && v !== 'agents') loadAgents()
+  if (oldV === 'agents' && v !== 'agents') {
+    loadAgents()
+    loadAgentDetails()
+  }
 })
 </script>
 
@@ -485,17 +631,13 @@ watch(view, (v, oldV) => {
            切回时消息不丢、气泡状态正确、滚动位置保留 ---- -->
       <div v-show="view === 'chat'" class="chat-view">
 
-      <!-- 头部：Agent 选择器。:options 绑定 JS 表达式：把 Agent 列表映射成下拉选项数组；
-           Naive UI 组件的值更新事件统一叫 update:xxx -->
+      <!-- 头部：当前会话绑定的 Agent（只读展示）。切换不再用下拉框——
+           在消息里输入 "@名字 正文" 强制路由（输入 @ 有补全弹窗），
+           回合结束后 syncSessionAgent 回拉会话，此处显示与 / 技能列表随之同步 -->
       <div class="chat-head">
-        <n-select
-          v-if="currentSession"
-          :value="currentAgentId"
-          :options="agents.map(a => ({label: a.name, value: a.id}))"
-          size="small"
-          style="width: 200px"
-          @update:value="onAgentChange"
-        />
+        <span v-if="currentSession" class="hint">
+          当前智能体：{{ currentAgentName || '未绑定（输入 @名字 可切换）' }}
+        </span>
         <span v-else class="hint">创建或选择一个会话开始</span>
       </div>
 
@@ -567,17 +709,38 @@ watch(view, (v, oldV) => {
         </div>
       </div>
 
-      <!-- 底部：输入区。@keydown.enter.exact.prevent="send" 解读：
-           .exact = 不带 Shift 等修饰键才触发；.prevent = preventDefault（阻止文本框换行）。
+      <!-- 底部：输入区（position:relative，作为建议浮层的定位上下文）。
+           @keydown.enter.exact="onEnterOrSend" 解读：
+           .exact = 不带 Shift 等修饰键才触发（Shift+Enter 照常换行）；
+           preventDefault 在 onEnterOrSend 内手动调用——输入法组合态（isComposing）
+           时直接放行不阻止默认行为，候选回车才能正常上屏（详见函数注释）。
+           浮层打开时 Enter 是"选中建议"而非发送（在 onEnterOrSend 内分流）。
            v-model:value = 双向绑定：输入框内容 ↔ input 变量（≈ 自动的 getText/setText） -->
       <div class="chat-input">
+        <!-- 建议浮层：输入首字符为 / 或 @ 时弹出在输入框上方（不遮挡发送按钮）。
+             mousedown.prevent = 点击选中不让文本框失焦；↑↓ 导航、Enter/Tab 选中、Esc 关闭 -->
+        <div v-if="suggVisible" class="sugg-pop">
+          <div
+            v-for="(it, i) in suggItems" :key="it.id || it.name"
+            class="sugg-item" :class="{active: i === suggIndex}"
+            @mouseenter="suggIndex = i"
+            @mousedown.prevent="selectSuggestion(it)"
+          >
+            <span class="sugg-name">{{ (suggTrigger.kind === 'skill' ? '/' : '@') + it.name }}</span>
+            <span v-if="it.description" class="sugg-desc">{{ it.description }}</span>
+          </div>
+          <div v-if="suggItems.length === 0" class="sugg-empty">{{ suggEmptyText }}</div>
+          <div class="sugg-hint">↑↓ 选择 · Enter/Tab 确认 · Esc 关闭</div>
+        </div>
         <n-input
+          ref="inputRef"
           v-model:value="input"
           type="textarea"
           :autosize="{minRows: 1, maxRows: 5}"
-          placeholder="输入消息，Enter 发送，Shift+Enter 换行；可用 @运维 强制路由"
+          placeholder="输入消息，Enter 发送，Shift+Enter 换行；/ 触发技能，@运维 强制路由"
           :disabled="sending"
-          @keydown.enter.exact.prevent="send"
+          @keydown="onSuggKeydown"
+          @keydown.enter.exact="onEnterOrSend"
         />
         <!-- 停止按钮：回合流式期间或部署执行期间出现。点击后本地立即收起气泡，
              后端以"已停止"收尾（回合走 chat:done，部署走 deploy:done canceled） -->
@@ -665,8 +828,34 @@ watch(view, (v, oldV) => {
 .msg-body :deep(p) { margin: 6px 0; }
 .msg-tools { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
 .chat-input {
+  position: relative; /* 建议浮层的定位上下文（浮层钉在输入区上方） */
   display: flex; gap: 10px; padding: 12px 24px; align-items: flex-end;
   border-top: 1px solid rgba(255,255,255,0.08);
+}
+/* 建议浮层：深色面板贴合主题（背景取全局 #18181c 略提亮），高亮沿用
+   会话列表的绿色选中色系；描述单行省略（部署技能的动态描述可能很长） */
+.sugg-pop {
+  position: absolute; bottom: calc(100% + 4px); left: 24px;
+  width: min(560px, calc(100% - 48px));
+  max-height: 260px; overflow-y: auto; z-index: 30;
+  background: #232329; border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,0.45);
+  padding: 4px;
+}
+.sugg-item {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+.sugg-item:hover, .sugg-item.active { background: rgba(99,226,183,0.15); }
+.sugg-name { font-family: Consolas, monospace; white-space: nowrap; }
+.sugg-desc {
+  color: rgba(255,255,255,0.55); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sugg-empty { padding: 8px 10px; font-size: 13px; color: rgba(255,255,255,0.45); }
+.sugg-hint {
+  margin-top: 2px; padding: 4px 10px; font-size: 11px;
+  color: rgba(255,255,255,0.35); border-top: 1px solid rgba(255,255,255,0.08);
 }
 /* 部署审批卡片：醒目的边框 + 等宽命令清单，写操作必须人工核对 */
 .deploy-card {
