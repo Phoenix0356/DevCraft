@@ -162,6 +162,17 @@ export function RejectDeployment(id) {
 }
 
 /**
+ * RenameSession 手动改会话标题（非空校验 + 截断 30 字后写回；改名后标题不再是
+ * "新会话"，首条消息的占位标题逻辑天然不会覆盖它）。前端：RenameSession(id, title)
+ * @param {string} id
+ * @param {string} title
+ * @returns {$CancellablePromise<void>}
+ */
+export function RenameSession(id, title) {
+    return $Call.ByID(641495045, id, title);
+}
+
+/**
  * SaveAgent 保存智能体信息（名称/模型/系统提示词；名称非空校验在编排层）。
  * 前端：SaveAgent(id, name, model, systemPrompt)
  * @param {string} id

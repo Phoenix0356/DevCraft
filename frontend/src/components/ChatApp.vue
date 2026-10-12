@@ -30,7 +30,8 @@ import {JSONStream} from '@wailsio/runtime'
 // 由 `wails3 generate bindings` 生成，勿手改。
 import {
   NewSession, ListSessions, DeleteSession, GetMessages,
-  SendMessage, CancelTurn, ListAgents, ListAgentsDetail, ApproveDeployment, RejectDeployment
+  SendMessage, CancelTurn, ListAgents, ListAgentsDetail, ApproveDeployment, RejectDeployment,
+  RenameSession
 } from '../../bindings/DevCraft/app.js'
 
 import {renderMarkdown} from '../lib/markdown'     // Markdown → HTML
@@ -400,6 +401,75 @@ async function removeSession(sess) {
   await loadSessions(true)
 }
 
+// ---------------- 会话标题：行内改名 ----------------
+// 标题由后端在首条消息时截断生成；手动改名后标题不再是"新会话"，
+// 占位逻辑天然不会覆盖。前端只负责发起改名并就地刷新。
+
+const editingId = ref(null)    // 正在行内改名的会话 id；null = 无
+const editingText = ref('')    // 改名输入框的临时文本
+
+// 自定义指令 v-auto-focus：元素挂载后聚焦内部 input 并全选文本。
+// n-input 用 v-if 动态出现，原生 autofocus 对"动态插入"的元素不总生效，故手动聚焦。
+// （<script setup> 里以 v 开头的变量会自动注册为同名指令：vAutoFocus → v-auto-focus）
+const vAutoFocus = {
+  mounted: (el) => {
+    const field = el.querySelector('input, textarea') || el
+    field.focus()
+    if (field.select) field.select()
+  }
+}
+
+/** 就地把某会话的标题更新到列表与 currentSession。
+ *  createSession 后 currentSession 可能与列表项不是同一对象引用（NewSession 返回体
+ *  vs 回拉列表项），故按 id 分别更新，两条数据流都覆盖到。 */
+function applyTitle(id, title) {
+  const item = sessions.value.find(x => x.id === id)
+  if (item) item.title = title
+  if (currentSession.value?.id === id) currentSession.value.title = title
+}
+
+/** ✏️：进入该会话的行内改名态，预填当前标题 */
+function startRename(s) {
+  editingId.value = s.id
+  editingText.value = s.title || ''
+}
+
+/** 取消改名（Esc）：直接退出编辑态，不发请求 */
+function cancelRename() {
+  editingId.value = null
+  editingText.value = ''
+}
+
+/** Enter 保存（输入法组合态防御，与 onEnterOrSend 同款思路）：
+ *  中文候选词按回车"上屏"时部分浏览器派发 key=Enter 且 isComposing=true，
+ *  此时放行不保存，把回车还给输入法；正常回车才提交改名。 */
+function onRenameEnter(s, e) {
+  if (e?.isComposing || e?.keyCode === 229) return
+  commitRename(s)
+}
+
+/** 保存改名（Enter / 失焦）：非空且有变化才调 RenameSession，成功就地更新。
+ *  幂等守卫：Enter 保存后输入框卸载会再触发 blur，用 editingId 命中判断防重复提交。
+ *  失败恢复：保存失败（后端校验/落库错误）时把输入态还原——重挂输入框并回填
+ *  用户刚敲的文本，让其能直接修正重试，而不是丢失已输入内容从头再来。 */
+async function commitRename(s) {
+  if (editingId.value !== s.id) return   // 已退出编辑态（Enter/Esc/切到别的项）：不重复提交
+  const title = editingText.value.trim()
+  editingId.value = null                 // 先退出编辑态（也阻断随后的 blur 再次进入）
+  if (!title || title === s.title) return // 空标题或未变化：不发请求（后端也会拒绝空标题）
+  try {
+    await RenameSession(s.id, title)
+    applyTitle(s.id, title)
+  } catch (err) {
+    message.error(String(err))           // 后端中文校验错误（如"标题不能为空"）直接展示
+    // 还原输入态：先回填文本再重挂输入框（editingId 命中即渲染 n-input，
+    // v-auto-focus 会自动聚焦全选），用户无需重新点开 ✏️ 就能改。
+    editingText.value = title
+    editingId.value = s.id
+  }
+}
+
+
 /** @ 前缀路由在后端切掉了会话绑定的 Agent——回合结束后重拉会话列表，
  *  把本地 currentSession 换成新对象，头部显示与 / 技能建议（都依赖 agentId）才不会停留在旧 Agent */
 async function syncSessionAgent() {
@@ -586,10 +656,28 @@ watch(view, (v, oldV) => {
           :class="{active: currentSession?.id === s.id}"
           @click="selectSession(s)"
         >
-          <span class="session-title">{{ s.title || '新会话' }}</span>
+          <!-- 行内改名：editingId 命中时标题变输入框（Enter/失焦保存、Esc 取消）。
+               v-auto-focus 挂载后自动聚焦全选；@click.stop 防止冒泡触发 selectSession -->
+          <n-input
+            v-if="editingId === s.id"
+            v-model:value="editingText"
+            v-auto-focus
+            size="tiny"
+            class="session-edit"
+            @click.stop
+            @keydown.enter="onRenameEnter(s, $event)"
+            @keyup.esc="cancelRename"
+            @blur="commitRename(s)"
+          />
+          <span v-else class="session-title">{{ s.title || '新会话' }}</span>
           <!-- {{ }} 双花括号 = 文本插值（≈ 模板引擎的 ${}），自动 HTML 转义 -->
-          <n-button quaternary size="tiny" class="session-del" @click.stop="removeSession(s)">✕</n-button>
-          <!-- .stop 修饰符 = 阻止事件冒泡（否则删会话会先触发外层的 selectSession） -->
+
+          <!-- 悬停操作组（不挤占标题布局）：✏️ 改名 / ✕ 删除。
+               .stop 阻止冒泡到 selectSession -->
+          <span v-if="editingId !== s.id" class="session-actions">
+            <n-button quaternary size="tiny" class="session-act" title="重命名" @click.stop="startRename(s)">✏️</n-button>
+            <n-button quaternary size="tiny" class="session-del" title="删除会话" @click.stop="removeSession(s)">✕</n-button>
+          </span>
         </div>
         <!-- v-if：条件渲染，列表为空时显示占位提示 -->
         <n-empty v-if="sessions.length === 0" description="暂无会话" size="small" class="empty"/>
@@ -781,9 +869,14 @@ watch(view, (v, oldV) => {
 }
 .session-item:hover { background: rgba(255,255,255,0.06); }
 .session-item.active { background: rgba(99,226,183,0.15); }
-.session-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-del { opacity: 0; }
-.session-item:hover .session-del { opacity: 1; } /* 悬停时才显示删除按钮 */
+/* 标题占据剩余宽度并可截断（min-width:0 是 flex 子项省略号生效的关键） */
+.session-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 行内改名输入框：撑满标题原本的宽度 */
+.session-edit { flex: 1; min-width: 0; }
+/* 悬停操作组（✏️/✕）：默认隐藏，hover 才显现，不挤占标题布局 */
+.session-actions { display: flex; align-items: center; gap: 2px; margin-left: 6px; opacity: 0; }
+.session-item:hover .session-actions { opacity: 1; }
+.session-act, .session-del { padding: 0 2px; } /* tiny 图标按钮收紧内边距，并排不溢出 */
 .sider-foot {
   padding: 8px 12px; border-top: 1px solid rgba(255,255,255,0.08);
   display: flex; flex-direction: column; gap: 2px; /* 设置 / 技能 / 智能体三个入口按钮纵向堆叠 */

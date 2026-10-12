@@ -123,8 +123,8 @@ func TestDeployFlowCRUD(t *testing.T) {
 	if got.Description != "部署 web 服务（灰度）" || len(got.Steps) != 3 {
 		t.Fatalf("flow mismatch after update: %+v", got)
 	}
-	if len(got.Params) != 1 || got.Params[0].Pattern == "" {
-		t.Fatalf("params round-trip failed: %+v", got.Params)
+	if len(f.Params) != 1 || f.Params[0].Pattern == "" {
+		t.Fatalf("params round-trip failed: %+v", f.Params)
 	}
 
 	// 列表

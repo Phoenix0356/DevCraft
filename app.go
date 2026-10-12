@@ -209,6 +209,16 @@ func (a *App) SetSessionAgent(sessionID, agentID string) error {
 	return svc.SetSessionAgent(sessionID, agentID)
 }
 
+// RenameSession 手动改会话标题（非空校验 + 截断 30 字后写回；改名后标题不再是
+// "新会话"，首条消息的占位标题逻辑天然不会覆盖它）。前端：RenameSession(id, title)
+func (a *App) RenameSession(id, title string) error {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return err
+	}
+	return svc.RenameSession(id, title)
+}
+
 // GetMessages 取会话历史消息。前端：GetMessages(sessionID)
 func (a *App) GetMessages(sessionID string) ([]store.Message, error) {
 	svc, err := a.svcOrErr()
