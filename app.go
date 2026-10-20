@@ -12,15 +12,16 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application" // Wails v3 应用框架（Streams/生命周期）
 
-	"DevCraft/internal/agent"        // Agent 引擎：Agent 定义注册表 + tool-calling 循环
-	"DevCraft/internal/appsvc"       // 编排层：会话/路由/设置的业务逻辑（本文件只做转发）
-	"DevCraft/internal/dockerx"      // Docker SDK 封装
-	"DevCraft/internal/secrets"      // API Key 加解密
-	"DevCraft/internal/skill"        // Skill 接口与注册表
-	"DevCraft/internal/skill/deploy" // 一键部署技能（生成待审批单，批准后由 appsvc 执行）
-	"DevCraft/internal/skill/ops"    // 运维域内置技能
-	"DevCraft/internal/skill/pg"     // PostgreSQL 查询域内置技能（只读三件套）
-	"DevCraft/internal/store"        // SQLite 持久层
+	"DevCraft/internal/agent"                    // Agent 引擎：Agent 定义注册表 + tool-calling 循环
+	"DevCraft/internal/appsvc"                   // 编排层：会话/路由/设置的业务逻辑（本文件只做转发）
+	"DevCraft/internal/dockerx"                  // Docker SDK 封装
+	"DevCraft/internal/secrets"                  // API Key 加解密
+	"DevCraft/internal/skill"                    // Skill 接口与注册表
+	apidocskill "DevCraft/internal/skill/apidoc" // 接口文档技能（规范交付/格式体检/导入触发）
+	"DevCraft/internal/skill/deploy"             // 一键部署技能（生成待审批单，批准后由 appsvc 执行）
+	"DevCraft/internal/skill/ops"                // 运维域内置技能
+	"DevCraft/internal/skill/pg"                 // PostgreSQL 查询域内置技能（只读三件套）
+	"DevCraft/internal/store"                    // SQLite 持久层
 )
 
 // chatStreamName 是聊天流式推送的 v3 Stream 通道名。
@@ -154,11 +155,23 @@ func buildService(emit appsvc.Emit) (*appsvc.Service, error) {
 	if err := pg.Register(skills, svc.PgSkillConfig, svc.PgQuery); err != nil {
 		return nil, err
 	}
-	// 9. 一次性自动补装迁移：把 3 个 pg 技能并集进内置运维 Agent 的装配
+	// 9. 接口文档技能（三件套：apidoc_spec 交付规范 / apidoc_check 格式体检 /
+	// apidoc_import 触发导入）：本包注入的仍是 svc ——四个技能侧方法都在 appsvc 上
+	// （见 internal/appsvc/apidocskill.go），校验/导入与界面向导共用同一套 Go 方法（D8）。
+	// 正文由技能自己读盘、init 与二次确认闸在服务层硬编码，技能包不 import appsvc。
+	if err := apidocskill.Register(skills, svc); err != nil {
+		return nil, err
+	}
+	// 10. 一次性自动补装迁移：把 3 个 pg 技能并集进内置运维 Agent 的装配
 	// （settings 标记 seed.pg_skills_v1 幂等，存量安装升级后自动获得新技能）。
 	// 必须放在技能注册之后：补装的是真实已注册的技能名。
 	if err := svc.MigratePgSkills(); err != nil {
 		return nil, fmt.Errorf("migrate pg skills: %w", err)
+	}
+	// 11. 同款补装：把 3 个接口文档技能并集进内置运维 Agent（标记 seed.apidoc_skills_v1）。
+	// 不补装就会"注册了但会话里调不到"——新会话默认绑定运维 Agent。
+	if err := svc.MigrateApiDocSkills(); err != nil {
+		return nil, fmt.Errorf("migrate apidoc skills: %w", err)
 	}
 	return svc, nil
 }
@@ -414,4 +427,194 @@ func (a *App) RejectDeployment(id string) error {
 		return err
 	}
 	return svc.RejectDeployment(id)
+}
+
+// --- 接口文档管理绑定（规范导出 + 导入向导 + 浏览/CRUD + 变更事件）---
+
+// ExportApiDocSpec 导出接口变更文档规范全文（api-doc-spec.md 内容，与 skill prompt
+// 同一常量字节一致，AC9）。前端：ExportApiDocSpec()
+func (a *App) ExportApiDocSpec() (string, error) {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return "", err
+	}
+	return svc.ExportApiDocSpec()
+}
+
+// PreviewApiDocImport 导入预览（只读，绝不写库）：解析 → Issue → 与库中定义算 diff
+// → 领域候选/变更预览/确认闸提示。前端：PreviewApiDocImport(req)
+func (a *App) PreviewApiDocImport(req appsvc.ApiDocImportRequest) (appsvc.ApiDocImportPreview, error) {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return appsvc.ApiDocImportPreview{}, err
+	}
+	return svc.PreviewApiDocImport(req)
+}
+
+// CommitApiDocImport 提交导入（单事务写入；E-*/破坏性未确认/init 闸门在服务层强制）。
+// 前端：CommitApiDocImport(req)
+func (a *App) CommitApiDocImport(req appsvc.ApiDocImportRequest) (appsvc.ApiDocImportResult, error) {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return appsvc.ApiDocImportResult{}, err
+	}
+	return svc.CommitApiDocImport(req)
+}
+
+// ApproveApiDocImport 批准「接口文档导入」审批单（api:approval 卡片的批准落点）。
+// chat 技能遇到删除/破坏性变更时只生成审批单，批准后才会单事务写入（D16）。
+// 前端：ApproveApiDocImport(id)
+func (a *App) ApproveApiDocImport(id string) error {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return err
+	}
+	return svc.ApproveApiDocImport(id)
+}
+
+// RejectApiDocImport 拒绝「接口文档导入」审批单（一行不写）。
+// 前端：RejectApiDocImport(id)
+func (a *App) RejectApiDocImport(id string) error {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return err
+	}
+	return svc.RejectApiDocImport(id)
+}
+
+// ListApiProjects 接口项目列表。前端：ListApiProjects()
+func (a *App) ListApiProjects() ([]store.ApiProject, error) {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return nil, err
+	}
+	return svc.ListApiProjects()
+}
+
+// ListApiDomains 项目下领域列表。前端：ListApiDomains(projectID)
+func (a *App) ListApiDomains(projectID string) ([]store.ApiDomain, error) {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return nil, err
+	}
+	return svc.ListApiDomains(projectID)
+}
+
+// SaveApiDomain 手工保存领域（改名/排序；服务端只收这两列，其余沿用库里既有值）。
+// 不提供手工新建与改归属项目（PRD D19）。前端：SaveApiDomain(domain)
+func (a *App) SaveApiDomain(domain store.ApiDomain) error {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return err
+	}
+	return svc.SaveApiDomain(domain)
+}
+
+// DeleteApiDomain 删除领域（只允许删空领域；领域下还有接口时中文错误拒收）。
+// 前端：DeleteApiDomain(id)
+func (a *App) DeleteApiDomain(id string) error {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return err
+	}
+	return svc.DeleteApiDomain(id)
+}
+
+// ListApiEntries 接口条目列表（默认过滤 internal 与 removed；keyword 模糊匹配名称/路径）。
+// 前端：ListApiEntries(q)
+func (a *App) ListApiEntries(q appsvc.ApiEntryQuery) ([]store.ApiEntry, error) {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return nil, err
+	}
+	return svc.ListApiEntries(q)
+}
+
+// GetApiEntry 接口条目详情（字段 + 命名结构 + 示例与 curl + 该接口历史事件）。
+// 前端：GetApiEntry(id)
+func (a *App) GetApiEntry(id string) (appsvc.ApiEntryDetail, error) {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return appsvc.ApiEntryDetail{}, err
+	}
+	return svc.GetApiEntry(id)
+}
+
+// SaveApiEntry 手工保存接口条目（不产生变更事件）。服务端读-改-写：只有
+// name/description/contentType/auth/visibility/sort/domainId 会被入参覆盖，
+// 双 hash、rawMarkdown、parseState、status、deletedAt、身份列一律沿用库里既有值
+// （清单与理由见 appsvc.SaveApiEntry）。前端：SaveApiEntry(entry)
+func (a *App) SaveApiEntry(entry store.ApiEntry) error {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return err
+	}
+	return svc.SaveApiEntry(entry)
+}
+
+// DeleteApiEntry 删除接口条目（软删 status=removed）。前端：DeleteApiEntry(id)
+func (a *App) DeleteApiEntry(id string) error {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return err
+	}
+	return svc.DeleteApiEntry(id)
+}
+
+// RestoreApiEntry 恢复软删的接口条目。前端：RestoreApiEntry(id)
+func (a *App) RestoreApiEntry(id string) error {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return err
+	}
+	return svc.RestoreApiEntry(id)
+}
+
+// DeleteApiProject 删除接口项目（手写级联清 9 张 api_* 表）。前端：DeleteApiProject(id)
+func (a *App) DeleteApiProject(id string) error {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return err
+	}
+	return svc.DeleteApiProject(id)
+}
+
+// ListApiChangeEvents 变更事件列表（seq DESC；可按 label 过滤；不含 doc_text）。
+// 前端：ListApiChangeEvents(q)
+func (a *App) ListApiChangeEvents(q appsvc.ApiEventQuery) ([]store.ApiChangeEvent, error) {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return nil, err
+	}
+	return svc.ListApiChangeEvents(q)
+}
+
+// ListApiChangeLabels 项目下出现过的事件 label（「按需求标签聚合」视图筛选器，D10）。
+// 前端：ListApiChangeLabels(projectID)
+func (a *App) ListApiChangeLabels(projectID string) ([]string, error) {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return nil, err
+	}
+	return svc.ListApiChangeLabels(projectID)
+}
+
+// GetApiChangeEvent 事件详情（事件头 + 明细含 diff 载荷；不含 doc_text）。
+// 前端：GetApiChangeEvent(id)
+func (a *App) GetApiChangeEvent(id int64) (appsvc.ApiChangeEventDetail, error) {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return appsvc.ApiChangeEventDetail{}, err
+	}
+	return svc.GetApiChangeEvent(id)
+}
+
+// GetApiChangeEventDocText 单独取事件保存的导入文档全文（D12 输入凭证，展开核对）。
+// 前端：GetApiChangeEventDocText(id)
+func (a *App) GetApiChangeEventDocText(id int64) (string, error) {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return "", err
+	}
+	return svc.GetApiChangeEventDocText(id)
 }

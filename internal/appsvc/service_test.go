@@ -33,7 +33,8 @@ func (blockingLLM) ChatStream(ctx context.Context, _ string, _ []llm.Message, _ 
 func newTestService(t *testing.T) *Service {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := store.Open(filepath.Join(dir, "test.db"))
+	lastTestDBPath = filepath.Join(dir, "test.db") // 供 apidoc 零残留断言开第二个只读连接做原始 SQL 计数
+	st, err := store.Open(lastTestDBPath)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -91,6 +92,10 @@ func newTestService(t *testing.T) *Service {
 // doneErrsHook 由 newTestService 设置，用例用它读取收到的 done 错误文案。
 // （包级变量仅测试使用；同一包内测试串行执行，无需并发保护。）
 var doneErrsHook func() []string
+
+// lastTestDBPath 由 newTestService 设置：最近一个测试库的文件路径
+// （apidoc 拒收零残留断言用它开独立的只读连接做全表计数）。
+var lastTestDBPath string
 
 // withTurnTimeout 临时调小回合总上限，测试结束自动还原（生产值 3 分钟）。
 func withTurnTimeout(t *testing.T, d time.Duration) {

@@ -85,20 +85,27 @@ type Service struct {
 	// 审批门禁：执行路径只能通过 takeApproval 从这里取单，未批准绝不执行。
 	approvalsMu sync.Mutex
 	approvals   map[string]*Approval
+
+	// 待审批「接口文档导入」注册表（内存态，带过期；形状与门禁照搬 deploy 的审批闸，
+	// 只是 payload 是导入请求而不是命令清单，见 apidocskill.go）。
+	// 门禁：写入路径只能通过 takeApiDocApproval 从这里取单，未批准一行不写（D16）。
+	apiApprovalsMu sync.Mutex
+	apiApprovals   map[string]*ApiDocApproval
 }
 
 // New 构造 Service。newLLM 默认指向真实的 OpenAI 适配器。
 func New(st *store.Store, agents *agent.Registry, skills *skill.Registry, docker *dockerx.Manager, box *secrets.Box, emit Emit) *Service {
 	s := &Service{
-		store:     st,
-		agents:    agents,
-		skills:    skills,
-		docker:    docker,
-		box:       box,
-		emit:      emit,
-		newLLM:    func(apiKey, baseURL string) llm.Client { return llm.NewOpenAIClient(apiKey, baseURL) },
-		turns:     map[string]*turnEntry{},
-		approvals: map[string]*Approval{},
+		store:        st,
+		agents:       agents,
+		skills:       skills,
+		docker:       docker,
+		box:          box,
+		emit:         emit,
+		newLLM:       func(apiKey, baseURL string) llm.Client { return llm.NewOpenAIClient(apiKey, baseURL) },
+		turns:        map[string]*turnEntry{},
+		approvals:    map[string]*Approval{},
+		apiApprovals: map[string]*ApiDocApproval{},
 	}
 	s.deployRunnerFor = s.deployStepRunner // 自引用默认值；测试可整体替换
 	return s
