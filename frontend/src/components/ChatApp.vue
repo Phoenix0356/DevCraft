@@ -1,9 +1,10 @@
 <!--
   ChatApp.vue —— 应用主界面（前端最核心的文件）。
-  布局：左侧会话侧边栏 + 右侧主区（三态视图，由 view 状态变量控制）：
+  布局：左侧会话侧边栏 + 右侧主区（四态视图，由 view 状态变量控制）：
     chat   —— 聊天区（头部 Agent 选择器 / 中部消息流 / 底部输入框）
     skills —— 技能管理视图（SkillManager：卡片网格占满视图，详情为弹窗）
     agents —— 智能体管理视图（AgentManager：卡片网格占满视图，详情为弹窗）
+    apidocs—— 接口文档视图（ApiDocManager：「接口」三栏浏览 + 「变更事件」列表与详情，含导入向导）
   技能/智能体为整个主区切换的视图（视图内详情用弹窗）；设置仍走 SettingsModal 弹窗。
   切到技能/智能体视图时聊天区 DOM 以 v-show 保留：流式帧照常接收处理，
   切回聊天页消息不丢、气泡与滚动状态原样。
@@ -31,13 +32,17 @@ import {JSONStream} from '@wailsio/runtime'
 import {
   NewSession, ListSessions, DeleteSession, GetMessages,
   SendMessage, CancelTurn, ListAgents, ListAgentsDetail, ApproveDeployment, RejectDeployment,
+  ApproveApiDocImport, RejectApiDocImport,
   RenameSession
 } from '../../bindings/DevCraft/app.js'
 
-import {renderMarkdown} from '../lib/markdown'     // Markdown → HTML
+import {renderMarkdown} from '../lib/markdown'      // Markdown → HTML
+import {decorateCodeBlocks} from '../lib/md-blocks' // HTML → 给每个代码块套标题栏外壳（见 lib/md-blocks.js）
+import {copyText} from '../lib/clipboard'           // 剪贴板写入（含 http 非安全上下文降级，见 lib/clipboard.js）
 import SettingsModal from './SettingsModal.vue'     // 设置弹窗子组件
 import SkillManager from './SkillManager.vue'       // 技能管理视图（主区三态之一，卡片网格 + 详情弹窗）
 import AgentManager from './AgentManager.vue'       // 智能体管理视图（主区三态之一，卡片网格 + 详情弹窗）
+import ApiDocManager from './ApiDocManager.vue'     // 接口文档视图（主区第四态：两个 tab + 三栏浏览 + 导入向导）
 
 // ---------------- 响应式状态（≈ 组件的成员变量）----------------
 const message = useMessage()          // 顶部轻提示器
@@ -50,7 +55,7 @@ const input = ref('')                 // 输入框双向绑定的文本
 const sending = ref(false)            // 是否正在等待 Agent 回合结束
 const streaming = ref(null)           // 流式气泡状态 {content, tools:[]}；null = 不在流式中
 const showSettings = ref(false)       // 设置弹窗显隐（与 SettingsModal 双向绑定）
-// 右侧主区当前视图：'chat' | 'skills' | 'agents'（技能/智能体为整块视图，不再是弹窗）
+// 右侧主区当前视图：'chat' | 'skills' | 'agents' | 'apidocs'（技能/智能体/接口文档为整块视图，不再是弹窗）
 const view = ref('chat')
 const listRef = ref(null)             // 消息列表 DOM 引用（模板里 ref="listRef" 自动注入），用于滚动
 
@@ -60,6 +65,65 @@ const currentAgentId = computed(() => currentSession.value?.agentId || '')
 const currentAgentName = computed(() =>
   agents.value.find(a => a.id === currentAgentId.value)?.name || '')
 // ?. 是可选链：currentSession 为 null 时不报错直接得 undefined（≈ Java 的 Optional.map）
+
+// ---------------- 代码块级复制 + 折叠（D2/D7/D8/D9）----------------
+// 交互链路三件套（谁读谁、谁写谁）：
+//   ① expandedBlocks（视图态 Set）→ ② renderedMessages（computed：状态烘进 HTML 的
+//      class）→ ③ onBlockClick（.msg-body 上的事件委托）写 Set → Vue 重算 ② →
+//      v-html 整段替换 → 折叠态更新。全程不摸 DOM 改样式。
+/** 已手动展开的长块 key 集合（key = 消息序号:块序号，如 'm3:1'）。
+ *  纯视图态：不入库、不发事件、不改消息内容（R3b），切会话清空。
+ *  用 ref(new Set()) 而非 reactive：Set 的 add/delete/has 由 Vue 的集合代理
+ *  自动做依赖收集，computed 里的 has() 读、handler 里的 add/delete 写都能触发重算。*/
+const expandedBlocks = ref(new Set())
+
+/** 正式 assistant 消息的渲染结果（HTML 字符串数组，下标与 messages 对齐）。
+ *  为什么是单个 computed 而不是模板里直接调函数：模板每次组件重渲染（包括输入框
+ *  每一次按键、流式每一个 delta）都会重跑函数，那样每条消息每帧都要走一遍
+ *  DOMParser；computed 只依赖 messages + expandedBlocks，两者不变即命中缓存。
+ *  用户气泡刻意不装饰：D2 的复制粒度是「AI 回复里的文档块」，用户消息的复制按钮
+ *  在 Out of Scope；且折叠遮罩的终点色是按 assistant 卡片底算出来的（见样式注释），
+ *  套到 #1f2b27 气泡上会露出一块色斑。*/
+const renderedMessages = computed(() =>
+  messages.value.map((m, i) => m.role === 'assistant'
+    ? decorateCodeBlocks(renderMarkdown(m.content), {keyPrefix: `m${i}`, expanded: expandedBlocks.value})
+    : renderMarkdown(m.content))
+)
+
+/** 块级复制：text 来自该块 <pre> 的 textContent（= 围栏内原文，零转换）
+ *  失败必须提示（AC4）：clipboard 两条降级路都不可用时 message.error，绝不静默 */
+async function copyBlock(text) {
+  if (await copyText(text)) {
+    message.success('已复制该块原文')
+  } else {
+    message.error('复制失败：当前环境剪贴板不可用')
+  }
+}
+
+/** 折叠开关：只翻 Set，真正的 class 由 renderedMessages 重算烘出来 */
+function toggleBlock(key) {
+  const set = expandedBlocks.value
+  if (set.has(key)) set.delete(key)
+  else set.add(key)
+}
+
+/** 块标题栏点击（D9.3 事件委托）：v-html 里的按钮 Vue 绑不了事件，所以在
+ *  .msg-body 容器上监听一次，closest('[data-act]') 找出被点的按钮再分流。
+ *  为什么不用 data-* 存正文（D9.4）：HTML 属性值里的换行会被折叠成空格、
+ *  & < > " 还得来回转义，复制到剪贴板就不再是围栏内原文（AC3 直接破）；
+ *  而 live DOM 里那个 <pre> 的 textContent 天然逐字节等于围栏内原文，白拿。*/
+function onBlockClick(e) {
+  const btn = e.target?.closest?.('[data-act]')
+  if (!btn) return                       // 点的是正文/表格等非按钮区域
+  const key = btn.getAttribute('data-key')
+  if (!key) return
+  if (btn.getAttribute('data-act') === 'copy') {
+    // 从被点按钮所属的那块往里取 pre：多个块各读各的，绝不串台（AC3）
+    copyBlock(btn.closest('.md-block')?.querySelector('pre')?.textContent ?? '')
+  } else if (btn.getAttribute('data-act') === 'toggle') {
+    toggleBlock(key)
+  }
+}
 
 // ---------------- 卡死防御：停止按钮 + 前端看门狗 ----------------
 // 后端已有双层超时（90 秒流空闲心跳 / 3 分钟回合总上限），看门狗是最后防线：
@@ -208,6 +272,83 @@ async function rejectDeploy() {
   }
   if (approval.value?.approvalId === id) {
     approval.value = {...approval.value, state: 'rejected'}
+  }
+}
+
+// ---------------- 接口文档导入：审批卡片 + 终态 ----------------
+// 第二条审批链路，与上面的部署链路**并行且状态隔离**：技能 apidoc_import 遇到
+// 「删除接口」或「破坏性变更」时不起手写入，而是起一张待审批单并推 api:approval 帧
+// → 用户点批准 → 后端 takeApiDocApproval 单次消费 + 异步 CommitApiDocImport
+// → api:done 帧回报终态。未批准/已拒绝/已过期，后端一行都不写（PRD D16）。
+// 两个 ref 各自独立、互不覆盖：两种审批同时出现的概率极低，但状态必须能共存。
+// 有效期只作静态提示，真正的过期判定在后端批准时兜底（与 deploy 同款）。
+const apiApproval = ref(null)  // 当前待处理导入审批单 {...载荷, state}；null = 无
+
+/** api:approval：收到接口文档导入审批卡片（按 sessionId 过滤后到达此处）。 */
+function onApiDocApproval(payload) {
+  if (!currentSession.value || payload.sessionId !== currentSession.value.id) return
+  apiApproval.value = {
+    approvalId: payload.approvalId,
+    docRef: payload.docRef || '',
+    project: payload.project || '',
+    mode: payload.mode || '',
+    breaking: payload.breaking || 0,   // 三态：0 无破坏 / 1 破坏性 / 2 需人工确认
+    nextSeq: payload.nextSeq || 0,     // 将生成的事件版本号（0 = 本次不产生事件）
+    summary: payload.summary || [],    // 逐接口变更摘要（后端已掩码，不含文档正文）
+    stats: payload.stats || {},
+    expiresInMin: Math.max(1, Math.round(((payload.expiresAt || 0) - Date.now()) / 60000)),
+    state: 'pending'
+  }
+  nextTick(scrollToBottom)
+}
+
+/** api:done：导入执行终态。rejected/expired 只更新卡片状态；
+ *  success/failed 收起卡片并把总结作助手消息入列表（后端同时已落库，
+ *  与 deploy:done 同款处理）。本链路不产生流式气泡，故不动 streaming。 */
+function onApiDocDone(payload) {
+  if (!currentSession.value || payload.sessionId !== currentSession.value.id) return
+  if (apiApproval.value && apiApproval.value.approvalId === payload.approvalId) {
+    if (payload.status === 'rejected' || payload.status === 'expired') {
+      apiApproval.value = {...apiApproval.value, state: payload.status}
+      return
+    }
+    apiApproval.value = null // 已落终态的审批卡片使命结束
+  }
+  if (payload.summary) {
+    messages.value.push({role: 'assistant', content: payload.summary})
+  }
+  nextTick(scrollToBottom)
+}
+
+/** 批准导入：卡片置已批准态，写入在后端异步进行，终态随后经 api:done 到达。
+ *  批准即人工二次确认成立——破坏性内容唯一的放行理由是用户刚点过批准，
+ *  而不是模型说了"确认"（PRD D5.1/D16）。 */
+async function approveApiDoc() {
+  if (!apiApproval.value) return
+  const id = apiApproval.value.approvalId
+  apiApproval.value = {...apiApproval.value, state: 'approving'}
+  try {
+    await ApproveApiDocImport(id)
+    if (apiApproval.value?.approvalId === id) {
+      apiApproval.value = {...apiApproval.value, state: 'approved'}
+    }
+  } catch (err) {
+    message.error(String(err)) // 常见原因：审批单已过期 / 已被处理
+    if (apiApproval.value?.approvalId === id) apiApproval.value = null
+  }
+}
+
+/** 拒绝导入：后端销毁审批单（绝不写入），卡片置已拒绝态。 */
+async function rejectApiDoc() {
+  if (!apiApproval.value) return
+  const id = apiApproval.value.approvalId
+  try {
+    await RejectApiDocImport(id)
+  } catch (err) {
+    message.error(String(err))
+  }
+  if (apiApproval.value?.approvalId === id) {
+    apiApproval.value = {...apiApproval.value, state: 'rejected'}
   }
 }
 
@@ -380,6 +521,10 @@ async function selectSession(sess) {
   streaming.value = null       // 切会话时丢弃旧的流式状态（若旧回合仍在跑，
   // 看门狗保持守卫：任何会话的帧都会重置它，回合 RPC 结束时 finally 清除）
   approval.value = null        // 审批卡片属于会话：切换后不再显示（帧按 sessionId 过滤）
+  apiApproval.value = null     // 接口文档导入审批卡片同理（两条链路各自独立清空）
+  // 代码块折叠态同理是会话内视图态（R3b）：整个 Set 换新对象（Vue 对 Set 的
+  // clear/add/delete 都能触发依赖，但换对象最直白，也顺带丢弃上一个会话的死 key）
+  expandedBlocks.value = new Set()
   deployRunning.value = false
   messages.value = ((await GetMessages(sess.id)) || []).map(normalize)
   await nextTick()             // 等消息渲染进 DOM
@@ -593,6 +738,8 @@ function onStreamFrame(ev) {
     case 'deploy:approval': onDeployApproval(frame.payload); break
     case 'deploy:progress': onDeployProgress(frame.payload); break
     case 'deploy:done': onDeployDone(frame.payload); break
+    case 'api:approval': onApiDocApproval(frame.payload); break
+    case 'api:done': onApiDocDone(frame.payload); break
   }
 }
 
@@ -708,10 +855,20 @@ watch(view, (v, oldV) => {
           <span class="sider-btn-icon">🤖</span>
           <span class="sider-btn-label">智能体</span>
         </n-button>
+        <!-- 接口文档：右侧主区切换为接口文档视图（「接口」三栏浏览 + 「变更事件」列表与详情 + 导入向导；
+             详情全部内联在栏内，不用弹窗） -->
+        <n-button
+          block quaternary class="sider-btn"
+          :class="{active: view === 'apidocs'}"
+          @click="view = 'apidocs'"
+        >
+          <span class="sider-btn-icon">📄</span>
+          <span class="sider-btn-label">接口文档</span>
+        </n-button>
       </div>
     </n-layout-sider>
 
-    <!-- ============ 右侧：主区（三态视图：聊天 / 技能 / 智能体） ============ -->
+    <!-- ============ 右侧：主区（四态视图：聊天 / 技能 / 智能体 / 接口文档） ============ -->
     <n-layout class="main">
 
       <!-- ---- chat 视图：v-show 保持 DOM 常驻（而非 v-if 卸载）。
@@ -733,18 +890,36 @@ watch(view, (v, oldV) => {
       <div ref="listRef" class="chat-list">
         <!-- ref="listRef" 把这个 DOM 元素注入到脚本里的 listRef 变量 -->
 
-        <!-- 历史消息：role 决定样式（用户/助手） -->
+        <!-- 历史消息：user = 右对齐暗色气泡；assistant = 靠左文档卡片（D1/D4）。
+             卡片头只有角色名（D4 第二轮修订：整条消息的复制按钮已移除，
+             复制粒度下沉到每个代码块自己的标题栏上，见 lib/md-blocks.js） -->
         <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
-          <div class="msg-role">{{ m.role === 'user' ? '我' : 'DevCraft' }}</div>
+          <div v-if="m.role === 'assistant'" class="msg-head">
+            <span class="msg-role">DevCraft</span>
+          </div>
+          <div v-else class="msg-role">{{ m.role === 'user' ? '我' : 'DevCraft' }}</div>
           <!-- v-html：把渲染后的 HTML 直接插入（用于 Markdown）。
-               注意：只用于可信内容（本应用的 LLM 回复），不可信输入会引发 XSS -->
-          <div class="msg-body" v-html="renderMarkdown(m.content)"></div>
+               注意：只用于可信内容（本应用的 LLM 回复），不可信输入会引发 XSS。
+               renderedMessages[i] = renderMarkdown + 代码块外壳装饰（assistant 才装饰）。
+               @click 挂在容器上做事件委托：v-html 里的块标题栏按钮（复制/展开收起）
+               是浏览器解析出来的原生节点，Vue 绑不上，只能由父容器接管（D9.3）。
+               用户气泡走同一处理也没副作用——那里面没有 [data-act] 节点，直接 return。-->
+          <div class="msg-body" @click="onBlockClick" v-html="renderedMessages[i]"></div>
         </div>
 
-        <!-- 流式气泡：sending 期间显示，内容随 chat:delta 增长 -->
+        <!-- 流式气泡：sending 期间显示，内容随 chat:delta 增长。
+             与正式 assistant 消息同款文档卡片，但按 D6 流式期间**不做块装饰**
+             （不注入标题栏、不折叠）：每个 delta 都会重跑渲染，若此时套外壳，
+             DOM 整段重排、折叠态随行数增长反复跳动、按钮一闪一闪。
+             done 帧把内容转成正式消息后，上面的 v-for 才走装饰路径。-->
         <div v-if="streaming" class="msg assistant">
-          <div class="msg-role">DevCraft</div>
-          <!-- 技能执行状态标签（n-tag 颜色随状态变化） -->
+          <div class="msg-head">
+            <span class="msg-role">DevCraft</span>
+          </div>
+          <!-- 技能执行状态标签（n-tag 颜色随状态变化）。
+               位置决策：保留在卡片内、角色名与正文之间（与原竖排顺序完全一致），
+               不合进 msg-head 行——标签可能多条换行（flex-wrap），塞头部会把单行
+               角色名撑歪；挪到卡片外上方则与所属正文割裂。类名/结构/行为未动（R4/AC7） -->
           <div class="msg-tools" v-if="streaming.tools.length">
             <n-tag
               v-for="(t, i) in streaming.tools" :key="i" size="small"
@@ -753,6 +928,8 @@ watch(view, (v, oldV) => {
               {{ t.skill }} {{ t.status === 'running' ? '执行中…' : t.status === 'failed' ? '失败' : '完成' }}
             </n-tag>
           </div>
+          <!-- 这里仍是裸 renderMarkdown：不装饰、不绑 @click（D6），
+               装饰与事件委托只在上面正式消息那条路径上 -->
           <div class="msg-body" v-html="renderMarkdown(streaming.content)"></div>
         </div>
 
@@ -794,6 +971,59 @@ watch(view, (v, oldV) => {
             :loading="approval.state === 'approving'"
             @click="approveDeploy"
           >批准执行</n-button>
+        </div>
+      </div>
+
+      <!-- 接口文档导入审批卡片：api:approval 帧到达时出现（与上面的部署卡片同属
+           .deploy-* 样式族，复用类名 → 视觉一致且零新增 CSS）。
+           摘要行是后端已掩码的「逐接口变更」文本，一律当纯文本渲染（零 v-html、
+           不走 marked）——这里展示的是外部导入文档派生内容，不能进 HTML 管道。 -->
+      <div v-if="apiApproval" class="deploy-card">
+        <div class="deploy-head">
+          <n-tag type="warning" size="small">接口文档导入审批</n-tag>
+          <strong class="deploy-title">项目「{{ apiApproval.project }}」</strong>
+          <span class="deploy-meta">
+            {{ apiApproval.mode === 'init' ? '初始化模式（不产生变更事件）' : '增量导入' }}<template v-if="apiApproval.nextSeq"> · 将生成 v{{ apiApproval.nextSeq }}</template>
+          </span>
+          <n-tag
+            :type="apiApproval.breaking === 1 ? 'error' : apiApproval.breaking === 2 ? 'warning' : 'success'"
+            size="small"
+          >
+            {{ apiApproval.breaking === 1 ? '含破坏性变更' : apiApproval.breaking === 2 ? '需人工确认' : '无破坏性' }}
+          </n-tag>
+          <n-tag
+            v-if="apiApproval.state !== 'pending'"
+            :type="apiApproval.state === 'approved' ? 'success' : apiApproval.state === 'rejected' ? 'error' : 'default'"
+            size="small"
+          >
+            {{ {approved: '已批准', rejected: '已拒绝', expired: '已过期', approving: '批准中…'}[apiApproval.state] || apiApproval.state }}
+          </n-tag>
+        </div>
+        <div v-if="apiApproval.docRef" class="deploy-desc">来源文档: {{ apiApproval.docRef }}</div>
+        <div class="deploy-params">
+          <span class="deploy-param">新增 {{ apiApproval.stats.added || 0 }}</span>
+          <span class="deploy-param">修改 {{ apiApproval.stats.updated || 0 }}</span>
+          <span class="deploy-param">删除 {{ apiApproval.stats.removed || 0 }}</span>
+          <span class="deploy-param">恢复 {{ apiApproval.stats.restored || 0 }}</span>
+        </div>
+        <div class="deploy-cmds">
+          <!-- 逐接口变更摘要：批准前必须让人看见"要删哪个/改哪个字段"，
+               这是点不点批准的唯一依据（PRD D9/D16） -->
+          <div v-for="(line, i) in apiApproval.summary" :key="i" class="deploy-cmd">{{ i + 1 }}. {{ line }}</div>
+        </div>
+        <div class="deploy-actions">
+          <span class="deploy-hint">请核对将写入与将删除的接口；批准后立即导入，{{ apiApproval.expiresInMin }} 分钟内未确认自动过期</span>
+          <n-button
+            size="small" type="error" secondary
+            :disabled="apiApproval.state !== 'pending'"
+            @click="rejectApiDoc"
+          >拒绝</n-button>
+          <n-button
+            size="small" type="primary"
+            :disabled="apiApproval.state !== 'pending'"
+            :loading="apiApproval.state === 'approving'"
+            @click="approveApiDoc"
+          >批准导入</n-button>
         </div>
       </div>
 
@@ -843,6 +1073,10 @@ watch(view, (v, oldV) => {
 
       <!-- ---- agents 视图：智能体管理（卡片网格 + 详情弹窗）。同上 ---- -->
       <AgentManager v-if="view === 'agents'"/>
+
+      <!-- ---- apidocs 视图：接口文档（「接口」/「变更事件」两个 tab + 导入向导）。
+             同上：v-if 渲染，进视图挂载即自拉数据 ---- -->
+      <ApiDocManager v-if="view === 'apidocs'"/>
     </n-layout>
   </n-layout>
 
@@ -879,7 +1113,7 @@ watch(view, (v, oldV) => {
 .session-act, .session-del { padding: 0 2px; } /* tiny 图标按钮收紧内边距，并排不溢出 */
 .sider-foot {
   padding: 8px 12px; border-top: 1px solid rgba(255,255,255,0.08);
-  display: flex; flex-direction: column; gap: 2px; /* 设置 / 技能 / 智能体三个入口按钮纵向堆叠 */
+  display: flex; flex-direction: column; gap: 2px; /* 设置 / 技能 / 智能体 / 接口文档四个入口按钮纵向堆叠 */
 }
 /* 入口按钮对齐：n-button 默认内容居中——撑满其内部 __content 容器后，
    用"固定宽度图标列 + 左对齐文字列"的 flex 行实现三按钮图标/文字各自纵向成列。
@@ -904,21 +1138,153 @@ watch(view, (v, oldV) => {
 .chat-view { display: flex; flex-direction: column; height: 100%; }
 .chat-head { padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; }
 .hint { color: rgba(255,255,255,0.45); font-size: 13px; }
-.chat-list { flex: 1; overflow-y: auto; padding: 16px 24px; }
+/* overflow-x 必须显式 hidden：CSS 规定一个轴非 visible 时另一轴自动按 auto 处理，
+   所以只要消息里有超宽内容（宽表格、长 inline code），就会长出横向滚动条，
+   把纵向滚动条推到窗口最右、中间露一条空面板。横向滚动一律禁掉，超宽内容由
+   元素自己滚（见下面 table/pre 的 overflow-x: auto）。 */
+.chat-list { flex: 1; min-width: 0; overflow-y: auto; overflow-x: hidden; padding: 16px 24px; }
 /* 气泡宽度随视图拉伸：16:9 宽屏下占满主区（1600px 上限防超宽屏行长失控） */
 .msg { margin-bottom: 18px; max-width: min(1600px, 100%); }
 .msg-role { font-size: 12px; color: rgba(255,255,255,0.45); margin-bottom: 4px; }
+/* ---- user 消息：右对齐暗色气泡（D1/D3）----
+   整列 align-items:flex-end → 角色名「我」与气泡一起贴右缘；
+   取色：底色 #1f2b27 是主色 #63e2b7 的暗调派生（与页面底色 #18181c 拉开一档，
+   替换原先太淡的 rgba(99,226,183,0.12)——用户点名要暗色实心）；
+   1px 边框 rgba(99,226,183,0.18) 用低透明度主色描边，可辨而不抢；
+   圆角 12px、右下角收 4px = 右侧消息的"尾巴"指向发送者（DeepSeek 风格）。
+   备选（若气泡色不满意只改这一处）：中性灰 #26262c + 边框 rgba(255,255,255,0.08) */
+.msg.user { display: flex; flex-direction: column; align-items: flex-end; }
 .msg.user .msg-body {
-  background: rgba(99,226,183,0.12); border-radius: 8px; padding: 8px 12px; display: inline-block;
+  background: #1f2b27;
+  border: 1px solid rgba(99,226,183,0.18);
+  border-radius: 12px 12px 4px 12px;
+  padding: 8px 12px;
+  max-width: 72%;   /* 内容列的 72%：长消息留宽度余量，且明显窄于 assistant 卡片（AC2） */
+  text-align: left; /* 右对齐只定位气泡，正文在泡内仍左对齐（R1） */
 }
-.msg-body { line-height: 1.6; font-size: 14px; word-break: break-word; }
+/* ---- assistant 消息：文档卡片，刻意不是聊天气泡（D4）----
+   长 markdown（表格/代码块/标题层级）需要"文档"感与可读宽度，气泡形态会压缩行宽
+   且与用户泡同质化，故：无主色底、无尾巴，占满内容列宽度（仅受 1600px 上限约束）。
+   取色：底 rgba(255,255,255,0.02) + 1px 边框 rgba(255,255,255,0.06)——在白字深色底上
+   只做出"比页面底色 #18181c 略亮一层"的分隔，弱于审批卡描边（琥珀 0.45），不抢正文 */
+.msg.assistant {
+  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 10px;
+  padding: 10px 14px;
+}
+/* 卡片头：第二轮修订后**只放角色名**——整条消息的「复制原文」按钮已移除
+   （D2/D4：复制粒度下沉到每个代码块自己的标题栏）。仍留 flex 行，与卡片内
+   msg-head / msg-tools 的基线一致，将来加徽标不用重排 */
+.msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.msg-head .msg-role { margin-bottom: 0; }
+/* word-break/overflow-wrap 是上一轮溢出修复的核心（R5）：长 token 在泡内/卡片内
+   任意位置断行，配合 .chat-list 的 overflow-x:hidden 保证不出横向滚动条 */
+.msg-body { line-height: 1.6; font-size: 14px; word-break: break-word; overflow-wrap: anywhere; }
 /* :deep() 穿透 scoped 限制，给 v-html 渲染出的 Markdown 元素加样式
    （scoped 默认不会作用于动态插入的子节点） */
+/* pre 显式写 line-height:1.5 + font-size:13px 是折叠限高的数学前提（见下面
+   .md-block-collapsed）：行盒由 pre 的 strut（line-height × 自身字号）与 code 的
+   行高取大者，两边必须同源才能用 calc(8 * 1.5em) 精确切在 8 行处。
+   13px 与 :deep(code) 的 13px 同值 → 视觉零变化，只是不再依赖继承来的 14px。 */
 .msg-body :deep(pre) {
   background: rgba(0,0,0,0.35); padding: 10px; border-radius: 6px; overflow-x: auto;
+  font-size: 13px; line-height: 1.5;
 }
-.msg-body :deep(code) { font-family: Consolas, monospace; font-size: 13px; }
+/* inline code 里的长 token（E-SPEC-BLOCK-MISSING、/api/v1.0/paper 这类）是
+   默认不换行的，撑宽父容器 → 允许任意位置断行 */
+.msg-body :deep(code) { font-family: Consolas, monospace; font-size: 13px; overflow-wrap: anywhere; }
 .msg-body :deep(p) { margin: 6px 0; }
+/* Markdown 表格（marked 开了 gfm:true，LLM 常回参数表/对照表）：
+   原先只有 pre/code/p 三条 :deep()，裸 <table> 无边框无对齐、行高失控，与深色 UI 明显不搭。
+   display:block + overflow-x:auto 是关键：table 的固有最小宽度不受 max-width 约束，
+   列多时会把整个消息列撑宽（→ 横向滚动条 + 右侧空面板），改成块级后表格**自己**横向滚。 */
+.msg-body :deep(table) {
+  display: block; border-collapse: collapse; margin: 8px 0; font-size: 13px;
+  max-width: 100%; overflow-x: auto;
+}
+.msg-body :deep(th), .msg-body :deep(td) {
+  border: 1px solid rgba(255,255,255,0.09); padding: 6px 10px; text-align: left; vertical-align: top;
+}
+.msg-body :deep(th) { color: rgba(255,255,255,0.55); font-weight: 600; background: rgba(255,255,255,0.03); }
+.msg-body :deep(td) { color: rgba(255,255,255,0.75); }
+/* ================= 代码块「文档块」：标题栏 + 折叠态（D7/D8/D9）=================
+   这些节点由 lib/md-blocks.js 用 DOMParser 烘进 HTML 字符串（不是 Vue 模板节点），
+   类名 .md-block / .md-block-collapsed / .md-block-head / .md-btn 两边要对齐，
+   改名得同时改装饰器。*/
+/* font-size:13px = 与 pre 行盒同源，好让下面遮罩的 calc(3 * 1.5em) 是整行倍数
+   （标题栏与按钮各自显式写 12px，不受这条影响） */
+.msg-body :deep(.md-block) { position: relative; margin: 8px 0; font-size: 13px; }
+/* 语言标签 + 行数靠左、按钮组靠右；flex-wrap 是窄窗口的保险：
+   「展开剩余 12 行」这类长文案挤不下时整组换行，而不是溢出卡片撑出横向滚动 */
+.msg-body :deep(.md-block-head) {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  padding: 0 2px 5px;
+}
+/* 语言标签用主色但压到 0.7 透明度：只当"这是什么格式"的记号，不抢正文 */
+.msg-body :deep(.md-block-lang) {
+  font-family: Consolas, monospace; font-size: 12px; color: rgba(99,226,183,0.7);
+}
+.msg-body :deep(.md-block-meta) { font-size: 12px; color: rgba(255,255,255,0.4); }
+.msg-body :deep(.md-block-acts) { margin-left: auto; display: flex; gap: 4px; }
+/* 标题栏按钮是原生 <button>（v-html 里渲染不出 n-button，见 D9），观感照抄侧栏
+   tiny quaternary：常态近乎透明（白 0.04 底 + 白 0.10 描边），hover 才现主色，
+   可见但不抢正文 */
+.msg-body :deep(.md-btn) {
+  font-family: inherit; font-size: 12px; line-height: 1.5;
+  color: rgba(255,255,255,0.7);
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10); border-radius: 4px;
+  padding: 1px 8px; cursor: pointer;
+}
+.msg-body :deep(.md-btn:hover) {
+  color: #63e2b7; background: rgba(99,226,183,0.12); border-color: rgba(99,226,183,0.45);
+}
+/* 折叠态限高 = 前 8 行：8 * 1.5em（em 取 pre 自己的 13px → 156px = 8 × 19.5px）。
+   不用魔法像素值：写死 156px 的话换个字号/行高就切在半行上。
+   ⚠️ 行数与 lib/md-blocks.js 的 COLLAPSE_PREVIEW_LINES 是同一个数（CSS 读不到
+   JS 常量、仓库不抽 token）——改一个必须改另一个，文案「展开剩余 N 行」才算得对。
+   overflow-y 显式 hidden：CSS 规定一个轴非 visible 时另一轴按 auto 处理，pre 已经
+   有 overflow-x:auto，这里留 auto 就会在折叠块里长出纵向滚动条（难看且跟遮罩打架）；
+   overflow-x 保持 auto，长行仍由 pre 自己横向滚，不撑宽卡片（R5 不得回归）。 */
+.msg-body :deep(.md-block-collapsed) pre {
+  /* content-box 显式写出来：仓库目前没有任何全局 box-sizing 重置，但一旦将来有人加
+     了 * { box-sizing: border-box }，max-height 会连 10px 下内边距一起算，切在半行上 */
+  box-sizing: content-box;
+  max-height: calc(8 * 1.5em);
+  overflow-x: auto; overflow-y: hidden;
+}
+/* 底部渐隐遮罩：纯装饰，pointer-events:none 保证不挡 pre 里的文字选中与滚动。
+   挂在**外壳 .md-block** 上而不是 pre 上——pre 自身是可横向滚动的滚动容器，
+   给滚动容器加 absolute 伪元素会跟着内容一起滚，盖不住可视区下沿。
+   终点色怎么算出来的（这条只能人工看眼，CSS 没有叠色计算）：
+     页面底 #18181c = rgb(24,24,28)
+   → assistant 卡片底 rgba(255,255,255,0.02) 合成：24*0.98 + 255*0.02 ≈ rgb(28.6, 28.6, 32.5)
+   → pre 再叠自己的 rgba(0,0,0,0.35)：0.65 × 上一行 ≈ rgb(19, 19, 21)
+   遮罩盖的是 **pre 内部**，所以终点取 rgb(19,19,21)；若图省事取卡片色 rgb(29,29,33)
+   或页面色 rgb(24,24,28)，折叠块底部就会显出一块更亮/更暗的色斑。
+   78% 提前压满：到 100% 才不透明的话最后一行字仍透出来，看着像没盖住。
+   高度取 3 行；pre 还有 10px 下内边距吃掉一截，实际压住约最后两行半——
+   觉得太厚/太薄就改这一个数。 */
+.msg-body :deep(.md-block-collapsed)::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0;
+  height: calc(3 * 1.5em); pointer-events: none;
+  background: linear-gradient(to bottom, rgba(19,19,21,0), rgb(19,19,21) 78%);
+  border-radius: 0 0 6px 6px; /* 跟着 pre 的 6px 圆角收口，遮罩方角不戳出卡片 */
+}
+/* 滚动条收窄（仓库此前无任何滚动条样式）：Windows 经典滚动条宽 17px，会实打实吃掉
+   内容宽度，配合上面的横向溢出就表现为"页面被往左拽、右侧露出一条空面板"。 */
+.chat-list::-webkit-scrollbar,
+.msg-body :deep(pre)::-webkit-scrollbar,
+.msg-body :deep(table)::-webkit-scrollbar { width: 8px; height: 8px; }
+.chat-list::-webkit-scrollbar-thumb,
+.msg-body :deep(pre)::-webkit-scrollbar-thumb,
+.msg-body :deep(table)::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.18); border-radius: 4px;
+}
+.chat-list::-webkit-scrollbar-track,
+.msg-body :deep(pre)::-webkit-scrollbar-track,
+.msg-body :deep(table)::-webkit-scrollbar-track { background: transparent; }
 .msg-tools { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
 .chat-input {
   position: relative; /* 建议浮层的定位上下文（浮层钉在输入区上方） */
