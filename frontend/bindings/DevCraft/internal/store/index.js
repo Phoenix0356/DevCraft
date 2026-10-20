@@ -4,6 +4,16 @@
 
 export {
     AgentRow,
+    ApiChangeEvent,
+    ApiChangeItem,
+    ApiDomain,
+    ApiEntry,
+    ApiEntryEventRef,
+    ApiEventStats,
+    ApiExample,
+    ApiField,
+    ApiProject,
+    ApiSchema,
     DeployFlow,
     FlowParam,
     Message,

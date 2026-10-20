@@ -6,6 +6,10 @@
 // @ts-ignore: Unused imports
 import { Create as $Create } from "@wailsio/runtime";
 
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as apidoc$0 from "../apidoc/models.js";
+
 /**
  * AgentRow Agent 定义实体（对应 agents + agent_skills 两张表）。
  */
@@ -74,6 +78,1066 @@ export class AgentRow {
             $$parsedSource["skills"] = $$createField5_0($$parsedSource["skills"]);
         }
         return new AgentRow(/** @type {Partial<AgentRow>} */($$parsedSource));
+    }
+}
+
+/**
+ * ApiChangeEvent 变更事件主表：一次导入 = 一行（导入即生效，无状态机，D10）。
+ */
+export class ApiChangeEvent {
+    /**
+     * Creates a new ApiChangeEvent instance.
+     * @param {Partial<ApiChangeEvent>} [$$source = {}] - The source object to create the ApiChangeEvent.
+     */
+    constructor($$source = {}) {
+        if (!("id" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["id"] = 0;
+        }
+        if (!("projectId" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["projectId"] = "";
+        }
+        if (!("seq" in $$source)) {
+            /**
+             * 项目内自增版本号（D7），0 = 插入时同事务 MAX(seq)+1
+             * @member
+             * @type {number}
+             */
+            this["seq"] = 0;
+        }
+        if (!("label" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["label"] = "";
+        }
+        if (!("title" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["title"] = "";
+        }
+        if (!("reason" in $$source)) {
+            /**
+             * 为什么改（= meta change_note）
+             * @member
+             * @type {string}
+             */
+            this["reason"] = "";
+        }
+        if (!("kind" in $$source)) {
+            /**
+             * feature|fix|refactor|docs
+             * @member
+             * @type {string}
+             */
+            this["kind"] = "";
+        }
+        if (!("breaking" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["breaking"] = 0;
+        }
+        if (!("source" in $$source)) {
+            /**
+             * import | manual
+             * @member
+             * @type {string}
+             */
+            this["source"] = "";
+        }
+        if (!("docRef" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["docRef"] = "";
+        }
+        if (!("scopeMode" in $$source)) {
+            /**
+             * incremental|full|init
+             * @member
+             * @type {string}
+             */
+            this["scopeMode"] = "";
+        }
+        if (!("stats" in $$source)) {
+            /**
+             * @member
+             * @type {ApiEventStats}
+             */
+            this["stats"] = (new ApiEventStats());
+        }
+        if (!("meta" in $$source)) {
+            /**
+             * JSON 扩展槽（doc_sha256 等，避免加列迁移）
+             * @member
+             * @type {{ [_ in string]?: any }}
+             */
+            this["meta"] = {};
+        }
+        if (!("docText" in $$source)) {
+            /**
+             * D12 输入凭证；仅 GetApiChangeEventDocText 返回
+             * @member
+             * @type {string}
+             */
+            this["docText"] = "";
+        }
+        if (!("createdAt" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["createdAt"] = 0;
+        }
+        if (!("updatedAt" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["updatedAt"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ApiChangeEvent instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {ApiChangeEvent}
+     */
+    static createFrom($$source = {}) {
+        const $$createField11_0 = $$createType1;
+        const $$createField12_0 = $$createType2;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("stats" in $$parsedSource) {
+            $$parsedSource["stats"] = $$createField11_0($$parsedSource["stats"]);
+        }
+        if ("meta" in $$parsedSource) {
+            $$parsedSource["meta"] = $$createField12_0($$parsedSource["meta"]);
+        }
+        return new ApiChangeEvent(/** @type {Partial<ApiChangeEvent>} */($$parsedSource));
+    }
+}
+
+/**
+ * ApiChangeItem 事件明细：本次涉及的每个接口。diff 列存字段级载荷
+ * （apidoc.DiffItem 数组，单一真相源在 internal/apidoc/diff.go）。
+ */
+export class ApiChangeItem {
+    /**
+     * Creates a new ApiChangeItem instance.
+     * @param {Partial<ApiChangeItem>} [$$source = {}] - The source object to create the ApiChangeItem.
+     */
+    constructor($$source = {}) {
+        if (!("id" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["id"] = 0;
+        }
+        if (!("eventId" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["eventId"] = 0;
+        }
+        if (!("projectId" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["projectId"] = "";
+        }
+        if (!("entryId" in $$source)) {
+            /**
+             * 软删后仍保留，供详情页跳转
+             * @member
+             * @type {string}
+             */
+            this["entryId"] = "";
+        }
+        if (!("domainName" in $$source)) {
+            /**
+             * 冗余快照（领域会被改名/合并）
+             * @member
+             * @type {string}
+             */
+            this["domainName"] = "";
+        }
+        if (!("entryName" in $$source)) {
+            /**
+             * 冗余快照（照 deploy_history.flow_name）
+             * @member
+             * @type {string}
+             */
+            this["entryName"] = "";
+        }
+        if (!("method" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["method"] = "";
+        }
+        if (!("path" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["path"] = "";
+        }
+        if (!("changeType" in $$source)) {
+            /**
+             * added|updated|removed|moved|restored
+             * @member
+             * @type {string}
+             */
+            this["changeType"] = "";
+        }
+        if (!("breaking" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["breaking"] = 0;
+        }
+        if (!("visibility" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["visibility"] = "";
+        }
+        if (!("diff" in $$source)) {
+            /**
+             * @member
+             * @type {apidoc$0.DiffItem[]}
+             */
+            this["diff"] = [];
+        }
+        if (!("declaredNote" in $$source)) {
+            /**
+             * = 文档「变更点」原文
+             * @member
+             * @type {string}
+             */
+            this["declaredNote"] = "";
+        }
+        if (!("sort" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["sort"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ApiChangeItem instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {ApiChangeItem}
+     */
+    static createFrom($$source = {}) {
+        const $$createField11_0 = $$createType4;
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("diff" in $$parsedSource) {
+            $$parsedSource["diff"] = $$createField11_0($$parsedSource["diff"]);
+        }
+        return new ApiChangeItem(/** @type {Partial<ApiChangeItem>} */($$parsedSource));
+    }
+}
+
+/**
+ * ApiDomain 领域 = 文档一级 ## 章节（PRD D1）。
+ */
+export class ApiDomain {
+    /**
+     * Creates a new ApiDomain instance.
+     * @param {Partial<ApiDomain>} [$$source = {}] - The source object to create the ApiDomain.
+     */
+    constructor($$source = {}) {
+        if (!("id" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["id"] = "";
+        }
+        if (!("projectId" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["projectId"] = "";
+        }
+        if (!("name" in $$source)) {
+            /**
+             * 归一后的领域名
+             * @member
+             * @type {string}
+             */
+            this["name"] = "";
+        }
+        if (!("internal" in $$source)) {
+            /**
+             * @member
+             * @type {boolean}
+             */
+            this["internal"] = false;
+        }
+        if (!("notesRaw" in $$source)) {
+            /**
+             * 章级 preamble，下渗给子接口
+             * @member
+             * @type {string}
+             */
+            this["notesRaw"] = "";
+        }
+        if (!("sort" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["sort"] = 0;
+        }
+        if (!("createdAt" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["createdAt"] = 0;
+        }
+        if (!("updatedAt" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["updatedAt"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ApiDomain instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {ApiDomain}
+     */
+    static createFrom($$source = {}) {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ApiDomain(/** @type {Partial<ApiDomain>} */($$parsedSource));
+    }
+}
+
+/**
+ * ApiEntry 接口条目：只存当前态，不存快照（PRD Goal-1）。
+ */
+export class ApiEntry {
+    /**
+     * Creates a new ApiEntry instance.
+     * @param {Partial<ApiEntry>} [$$source = {}] - The source object to create the ApiEntry.
+     */
+    constructor($$source = {}) {
+        if (!("id" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["id"] = "";
+        }
+        if (!("projectId" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["projectId"] = "";
+        }
+        if (!("domainId" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["domainId"] = "";
+        }
+        if (!("name" in $$source)) {
+            /**
+             * 接口中文名（不参与 diff）
+             * @member
+             * @type {string}
+             */
+            this["name"] = "";
+        }
+        if (!("method" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["method"] = "";
+        }
+        if (!("pathRaw" in $$source)) {
+            /**
+             * 原样（含 {id}）
+             * @member
+             * @type {string}
+             */
+            this["pathRaw"] = "";
+        }
+        if (!("identityKey" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["identityKey"] = "";
+        }
+        if (!("basePathAssert" in $$source)) {
+            /**
+             * 导入时的断言凭证
+             * @member
+             * @type {string}
+             */
+            this["basePathAssert"] = "";
+        }
+        if (!("contentType" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["contentType"] = "";
+        }
+        if (!("auth" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["auth"] = "";
+        }
+        if (!("visibility" in $$source)) {
+            /**
+             * public | internal
+             * @member
+             * @type {string}
+             */
+            this["visibility"] = "";
+        }
+        if (!("semanticHash" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["semanticHash"] = "";
+        }
+        if (!("docHash" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["docHash"] = "";
+        }
+        if (!("description" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["description"] = "";
+        }
+        if (!("parseState" in $$source)) {
+            /**
+             * ok | partial | unparsed
+             * @member
+             * @type {string}
+             */
+            this["parseState"] = "";
+        }
+        if (!("rawMarkdown" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["rawMarkdown"] = "";
+        }
+        if (!("status" in $$source)) {
+            /**
+             * active | removed（软删）
+             * @member
+             * @type {string}
+             */
+            this["status"] = "";
+        }
+        if (!("deletedAt" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["deletedAt"] = 0;
+        }
+        if (!("sort" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["sort"] = 0;
+        }
+        if (!("createdAt" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["createdAt"] = 0;
+        }
+        if (!("updatedAt" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["updatedAt"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ApiEntry instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {ApiEntry}
+     */
+    static createFrom($$source = {}) {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ApiEntry(/** @type {Partial<ApiEntry>} */($$parsedSource));
+    }
+}
+
+/**
+ * ApiEntryEventRef 条目详情页的「该接口历史事件」反向关联行（R9/AC7）。
+ * change_type/breaking 取自明细行（同一接口在不同事件里的角色不同）。
+ */
+export class ApiEntryEventRef {
+    /**
+     * Creates a new ApiEntryEventRef instance.
+     * @param {Partial<ApiEntryEventRef>} [$$source = {}] - The source object to create the ApiEntryEventRef.
+     */
+    constructor($$source = {}) {
+        if (!("eventId" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["eventId"] = 0;
+        }
+        if (!("itemId" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["itemId"] = 0;
+        }
+        if (!("seq" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["seq"] = 0;
+        }
+        if (!("label" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["label"] = "";
+        }
+        if (!("title" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["title"] = "";
+        }
+        if (!("kind" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["kind"] = "";
+        }
+        if (!("breaking" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["breaking"] = 0;
+        }
+        if (!("changeType" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["changeType"] = "";
+        }
+        if (!("createdAt" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["createdAt"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ApiEntryEventRef instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {ApiEntryEventRef}
+     */
+    static createFrom($$source = {}) {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ApiEntryEventRef(/** @type {Partial<ApiEntryEventRef>} */($$parsedSource));
+    }
+}
+
+/**
+ * ApiEventStats 事件头统计（列表页免 join 聚合），存 stats JSON 列。
+ */
+export class ApiEventStats {
+    /**
+     * Creates a new ApiEventStats instance.
+     * @param {Partial<ApiEventStats>} [$$source = {}] - The source object to create the ApiEventStats.
+     */
+    constructor($$source = {}) {
+        if (!("added" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["added"] = 0;
+        }
+        if (!("updated" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["updated"] = 0;
+        }
+        if (!("removed" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["removed"] = 0;
+        }
+        if (!("moved" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["moved"] = 0;
+        }
+        if (!("restored" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["restored"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ApiEventStats instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {ApiEventStats}
+     */
+    static createFrom($$source = {}) {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ApiEventStats(/** @type {Partial<ApiEventStats>} */($$parsedSource));
+    }
+}
+
+/**
+ * ApiExample 示例与 curl：整块原文，永不结构化、不参与 diff（D9）。
+ */
+export class ApiExample {
+    /**
+     * Creates a new ApiExample instance.
+     * @param {Partial<ApiExample>} [$$source = {}] - The source object to create the ApiExample.
+     */
+    constructor($$source = {}) {
+        if (!("id" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["id"] = 0;
+        }
+        if (!("ownerKind" in $$source)) {
+            /**
+             * endpoint | schema
+             * @member
+             * @type {string}
+             */
+            this["ownerKind"] = "";
+        }
+        if (!("ownerId" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["ownerId"] = "";
+        }
+        if (!("kind" in $$source)) {
+            /**
+             * req_example|res_example|curl|multipart_raw|error_example
+             * @member
+             * @type {string}
+             */
+            this["kind"] = "";
+        }
+        if (!("language" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["language"] = "";
+        }
+        if (!("content" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["content"] = "";
+        }
+        if (!("sort" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["sort"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ApiExample instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {ApiExample}
+     */
+    static createFrom($$source = {}) {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ApiExample(/** @type {Partial<ApiExample>} */($$parsedSource));
+    }
+}
+
+/**
+ * ApiField 参数/返回/VO 字段：一行一字段。字段级 diff 的身份就在
+ * UNIQUE(owner_kind, owner_id, kind, name) 这条数据库级唯一索引上。
+ */
+export class ApiField {
+    /**
+     * Creates a new ApiField instance.
+     * @param {Partial<ApiField>} [$$source = {}] - The source object to create the ApiField.
+     */
+    constructor($$source = {}) {
+        if (!("id" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["id"] = 0;
+        }
+        if (!("ownerKind" in $$source)) {
+            /**
+             * endpoint | schema
+             * @member
+             * @type {string}
+             */
+            this["ownerKind"] = "";
+        }
+        if (!("ownerId" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["ownerId"] = "";
+        }
+        if (!("kind" in $$source)) {
+            /**
+             * request|response|path|header（schema 恒 body）
+             * @member
+             * @type {string}
+             */
+            this["kind"] = "";
+        }
+        if (!("name" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["name"] = "";
+        }
+        if (!("typeRaw" in $$source)) {
+            /**
+             * 显示保真
+             * @member
+             * @type {string}
+             */
+            this["typeRaw"] = "";
+        }
+        if (!("typeKey" in $$source)) {
+            /**
+             * 比较归一
+             * @member
+             * @type {string}
+             */
+            this["typeKey"] = "";
+        }
+        if (!("required" in $$source)) {
+            /**
+             * -1 未知（无该列）| 0 否 | 1 是
+             * @member
+             * @type {number}
+             */
+            this["required"] = 0;
+        }
+        if (!("position" in $$source)) {
+            /**
+             * Path|Query|Body|Header
+             * @member
+             * @type {string}
+             */
+            this["position"] = "";
+        }
+        if (!("defaultValue" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["defaultValue"] = "";
+        }
+        if (!("description" in $$source)) {
+            /**
+             * 中文说明，不进 semantic_hash
+             * @member
+             * @type {string}
+             */
+            this["description"] = "";
+        }
+        if (!("factsJson" in $$source)) {
+            /**
+             * JSON 扩展槽（整读整写，MVP 解析器不填充）
+             * @member
+             * @type {string}
+             */
+            this["factsJson"] = "";
+        }
+        if (!("refSchemaId" in $$source)) {
+            /**
+             * = $ref 语义（VO 引用），空 = 标量
+             * @member
+             * @type {string}
+             */
+            this["refSchemaId"] = "";
+        }
+        if (!("depth" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["depth"] = 0;
+        }
+        if (!("sort" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["sort"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ApiField instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {ApiField}
+     */
+    static createFrom($$source = {}) {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ApiField(/** @type {Partial<ApiField>} */($$parsedSource));
+    }
+}
+
+/**
+ * ApiProject 项目 = 一个后端服务/代码仓库（PRD D13）。
+ */
+export class ApiProject {
+    /**
+     * Creates a new ApiProject instance.
+     * @param {Partial<ApiProject>} [$$source = {}] - The source object to create the ApiProject.
+     */
+    constructor($$source = {}) {
+        if (!("id" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["id"] = "";
+        }
+        if (!("name" in $$source)) {
+            /**
+             * 服务标识 = meta 里的 project，全局唯一
+             * @member
+             * @type {string}
+             */
+            this["name"] = "";
+        }
+        if (!("display" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["display"] = "";
+        }
+        if (!("basePath" in $$source)) {
+            /**
+             * 仅用于校验与导出，不参与身份键
+             * @member
+             * @type {string}
+             */
+            this["basePath"] = "";
+        }
+        if (!("createdAt" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["createdAt"] = 0;
+        }
+        if (!("updatedAt" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["updatedAt"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ApiProject instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {ApiProject}
+     */
+    static createFrom($$source = {}) {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ApiProject(/** @type {Partial<ApiProject>} */($$parsedSource));
+    }
+}
+
+/**
+ * ApiSchema 命名结构（≈ OpenAPI components/schemas 极简版）。
+ * 主键 (project_id, name, owner_scope)；同名不同构 → Ambiguous，禁止按名自动展开。
+ */
+export class ApiSchema {
+    /**
+     * Creates a new ApiSchema instance.
+     * @param {Partial<ApiSchema>} [$$source = {}] - The source object to create the ApiSchema.
+     */
+    constructor($$source = {}) {
+        if (!("id" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["id"] = "";
+        }
+        if (!("projectId" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["projectId"] = "";
+        }
+        if (!("name" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["name"] = "";
+        }
+        if (!("ownerScope" in $$source)) {
+            /**
+             * '' = 文档级；否则 = 宿主接口 id
+             * @member
+             * @type {string}
+             */
+            this["ownerScope"] = "";
+        }
+        if (!("rawMarkdown" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["rawMarkdown"] = "";
+        }
+        if (!("bodyHash" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["bodyHash"] = "";
+        }
+        if (!("ambiguous" in $$source)) {
+            /**
+             * @member
+             * @type {boolean}
+             */
+            this["ambiguous"] = false;
+        }
+        if (!("createdAt" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["createdAt"] = 0;
+        }
+        if (!("updatedAt" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["updatedAt"] = 0;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ApiSchema instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {ApiSchema}
+     */
+    static createFrom($$source = {}) {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ApiSchema(/** @type {Partial<ApiSchema>} */($$parsedSource));
     }
 }
 
@@ -154,7 +1218,7 @@ export class DeployFlow {
      * @returns {DeployFlow}
      */
     static createFrom($$source = {}) {
-        const $$createField4_0 = $$createType2;
+        const $$createField4_0 = $$createType6;
         const $$createField5_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("params" in $$parsedSource) {
@@ -336,5 +1400,9 @@ export class Session {
 
 // Private type creation functions
 const $$createType0 = $Create.Array($Create.Any);
-const $$createType1 = FlowParam.createFrom;
-const $$createType2 = $Create.Array($$createType1);
+const $$createType1 = ApiEventStats.createFrom;
+const $$createType2 = $Create.Map($Create.Any, $Create.Any);
+const $$createType3 = apidoc$0.DiffItem.createFrom;
+const $$createType4 = $Create.Array($$createType3);
+const $$createType5 = FlowParam.createFrom;
+const $$createType6 = $Create.Array($$createType5);

@@ -20,6 +20,17 @@ import * as appsvc$0 from "./internal/appsvc/models.js";
 import * as store$0 from "./internal/store/models.js";
 
 /**
+ * ApproveApiDocImport 批准「接口文档导入」审批单（api:approval 卡片的批准落点）。
+ * chat 技能遇到删除/破坏性变更时只生成审批单，批准后才会单事务写入（D16）。
+ * 前端：ApproveApiDocImport(id)
+ * @param {string} id
+ * @returns {$CancellablePromise<void>}
+ */
+export function ApproveApiDocImport(id) {
+    return $Call.ByID(1016477861, id);
+}
+
+/**
  * ApproveDeployment 批准部署审批单：校验门禁通过后异步执行，进度经聊天流帧推送。
  * 未批准/已拒绝/已过期的单子在这里都会被拒绝（代码强制门禁）。
  * @param {string} id
@@ -37,6 +48,46 @@ export function ApproveDeployment(id) {
  */
 export function CancelTurn(sessionID) {
     return $Call.ByID(2865305064, sessionID);
+}
+
+/**
+ * CommitApiDocImport 提交导入（单事务写入；E-* /破坏性未确认/init 闸门在服务层强制）。
+ * 前端：CommitApiDocImport(req)
+ * @param {appsvc$0.ApiDocImportRequest} req
+ * @returns {$CancellablePromise<appsvc$0.ApiDocImportResult>}
+ */
+export function CommitApiDocImport(req) {
+    return $Call.ByID(568072079, req).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType0($result);
+    }));
+}
+
+/**
+ * DeleteApiDomain 删除领域（只允许删空领域；领域下还有接口时中文错误拒收）。
+ * 前端：DeleteApiDomain(id)
+ * @param {string} id
+ * @returns {$CancellablePromise<void>}
+ */
+export function DeleteApiDomain(id) {
+    return $Call.ByID(1110312042, id);
+}
+
+/**
+ * DeleteApiEntry 删除接口条目（软删 status=removed）。前端：DeleteApiEntry(id)
+ * @param {string} id
+ * @returns {$CancellablePromise<void>}
+ */
+export function DeleteApiEntry(id) {
+    return $Call.ByID(555214270, id);
+}
+
+/**
+ * DeleteApiProject 删除接口项目（手写级联清 9 张 api_* 表）。前端：DeleteApiProject(id)
+ * @param {string} id
+ * @returns {$CancellablePromise<void>}
+ */
+export function DeleteApiProject(id) {
+    return $Call.ByID(2470023959, id);
 }
 
 /**
@@ -58,13 +109,56 @@ export function DeleteSession(id) {
 }
 
 /**
+ * ExportApiDocSpec 导出接口变更文档规范全文（api-doc-spec.md 内容，与 skill prompt
+ * 同一常量字节一致，AC9）。前端：ExportApiDocSpec()
+ * @returns {$CancellablePromise<string>}
+ */
+export function ExportApiDocSpec() {
+    return $Call.ByID(3804973778);
+}
+
+/**
+ * GetApiChangeEvent 事件详情（事件头 + 明细含 diff 载荷；不含 doc_text）。
+ * 前端：GetApiChangeEvent(id)
+ * @param {number} id
+ * @returns {$CancellablePromise<appsvc$0.ApiChangeEventDetail>}
+ */
+export function GetApiChangeEvent(id) {
+    return $Call.ByID(1500584183, id).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType1($result);
+    }));
+}
+
+/**
+ * GetApiChangeEventDocText 单独取事件保存的导入文档全文（D12 输入凭证，展开核对）。
+ * 前端：GetApiChangeEventDocText(id)
+ * @param {number} id
+ * @returns {$CancellablePromise<string>}
+ */
+export function GetApiChangeEventDocText(id) {
+    return $Call.ByID(2800246692, id);
+}
+
+/**
+ * GetApiEntry 接口条目详情（字段 + 命名结构 + 示例与 curl + 该接口历史事件）。
+ * 前端：GetApiEntry(id)
+ * @param {string} id
+ * @returns {$CancellablePromise<appsvc$0.ApiEntryDetail>}
+ */
+export function GetApiEntry(id) {
+    return $Call.ByID(3949874035, id).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType2($result);
+    }));
+}
+
+/**
  * GetMessages 取会话历史消息。前端：GetMessages(sessionID)
  * @param {string} sessionID
  * @returns {$CancellablePromise<store$0.Message[]>}
  */
 export function GetMessages(sessionID) {
     return $Call.ByID(3832618599, sessionID).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType1($result);
+        return $$createType4($result);
     }));
 }
 
@@ -74,7 +168,7 @@ export function GetMessages(sessionID) {
  */
 export function GetPgSettings() {
     return $Call.ByID(2053575403).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType2($result);
+        return $$createType5($result);
     }));
 }
 
@@ -84,7 +178,7 @@ export function GetPgSettings() {
  */
 export function GetSettings() {
     return $Call.ByID(2554697378).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType3($result);
+        return $$createType6($result);
     }));
 }
 
@@ -94,7 +188,7 @@ export function GetSettings() {
  */
 export function ListAgents() {
     return $Call.ByID(578673379).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType5($result);
+        return $$createType8($result);
     }));
 }
 
@@ -105,7 +199,64 @@ export function ListAgents() {
  */
 export function ListAgentsDetail() {
     return $Call.ByID(655126258).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType7($result);
+        return $$createType10($result);
+    }));
+}
+
+/**
+ * ListApiChangeEvents 变更事件列表（seq DESC；可按 label 过滤；不含 doc_text）。
+ * 前端：ListApiChangeEvents(q)
+ * @param {appsvc$0.ApiEventQuery} q
+ * @returns {$CancellablePromise<store$0.ApiChangeEvent[]>}
+ */
+export function ListApiChangeEvents(q) {
+    return $Call.ByID(2448817154, q).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType12($result);
+    }));
+}
+
+/**
+ * ListApiChangeLabels 项目下出现过的事件 label（「按需求标签聚合」视图筛选器，D10）。
+ * 前端：ListApiChangeLabels(projectID)
+ * @param {string} projectID
+ * @returns {$CancellablePromise<string[]>}
+ */
+export function ListApiChangeLabels(projectID) {
+    return $Call.ByID(2153635652, projectID).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType13($result);
+    }));
+}
+
+/**
+ * ListApiDomains 项目下领域列表。前端：ListApiDomains(projectID)
+ * @param {string} projectID
+ * @returns {$CancellablePromise<store$0.ApiDomain[]>}
+ */
+export function ListApiDomains(projectID) {
+    return $Call.ByID(1927852524, projectID).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType15($result);
+    }));
+}
+
+/**
+ * ListApiEntries 接口条目列表（默认过滤 internal 与 removed；keyword 模糊匹配名称/路径）。
+ * 前端：ListApiEntries(q)
+ * @param {appsvc$0.ApiEntryQuery} q
+ * @returns {$CancellablePromise<store$0.ApiEntry[]>}
+ */
+export function ListApiEntries(q) {
+    return $Call.ByID(1145897137, q).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType17($result);
+    }));
+}
+
+/**
+ * ListApiProjects 接口项目列表。前端：ListApiProjects()
+ * @returns {$CancellablePromise<store$0.ApiProject[]>}
+ */
+export function ListApiProjects() {
+    return $Call.ByID(1840015913).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType19($result);
     }));
 }
 
@@ -115,7 +266,7 @@ export function ListAgentsDetail() {
  */
 export function ListDeployFlows() {
     return $Call.ByID(1498518071).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType9($result);
+        return $$createType21($result);
     }));
 }
 
@@ -125,7 +276,7 @@ export function ListDeployFlows() {
  */
 export function ListSessions() {
     return $Call.ByID(827108744).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType11($result);
+        return $$createType23($result);
     }));
 }
 
@@ -138,7 +289,7 @@ export function ListSessions() {
  */
 export function ListSkills() {
     return $Call.ByID(1140726611).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType13($result);
+        return $$createType25($result);
     }));
 }
 
@@ -148,8 +299,30 @@ export function ListSkills() {
  */
 export function NewSession() {
     return $Call.ByID(2850677243).then(/** @type {($result: any) => any} */(($result) => {
-        return $$createType10($result);
+        return $$createType22($result);
     }));
+}
+
+/**
+ * PreviewApiDocImport 导入预览（只读，绝不写库）：解析 → Issue → 与库中定义算 diff
+ * → 领域候选/变更预览/确认闸提示。前端：PreviewApiDocImport(req)
+ * @param {appsvc$0.ApiDocImportRequest} req
+ * @returns {$CancellablePromise<appsvc$0.ApiDocImportPreview>}
+ */
+export function PreviewApiDocImport(req) {
+    return $Call.ByID(130351124, req).then(/** @type {($result: any) => any} */(($result) => {
+        return $$createType26($result);
+    }));
+}
+
+/**
+ * RejectApiDocImport 拒绝「接口文档导入」审批单（一行不写）。
+ * 前端：RejectApiDocImport(id)
+ * @param {string} id
+ * @returns {$CancellablePromise<void>}
+ */
+export function RejectApiDocImport(id) {
+    return $Call.ByID(257760217, id);
 }
 
 /**
@@ -173,6 +346,15 @@ export function RenameSession(id, title) {
 }
 
 /**
+ * RestoreApiEntry 恢复软删的接口条目。前端：RestoreApiEntry(id)
+ * @param {string} id
+ * @returns {$CancellablePromise<void>}
+ */
+export function RestoreApiEntry(id) {
+    return $Call.ByID(866802605, id);
+}
+
+/**
  * SaveAgent 保存智能体信息（名称/模型/系统提示词；名称非空校验在编排层）。
  * 前端：SaveAgent(id, name, model, systemPrompt)
  * @param {string} id
@@ -183,6 +365,28 @@ export function RenameSession(id, title) {
  */
 export function SaveAgent(id, name, model, systemPrompt) {
     return $Call.ByID(3768442673, id, name, model, systemPrompt);
+}
+
+/**
+ * SaveApiDomain 手工保存领域（改名/排序；服务端只收这两列，其余沿用库里既有值）。
+ * 不提供手工新建与改归属项目（PRD D19）。前端：SaveApiDomain(domain)
+ * @param {store$0.ApiDomain} domain
+ * @returns {$CancellablePromise<void>}
+ */
+export function SaveApiDomain(domain) {
+    return $Call.ByID(1587395628, domain);
+}
+
+/**
+ * SaveApiEntry 手工保存接口条目（不产生变更事件）。服务端读-改-写：只有
+ * name/description/contentType/auth/visibility/sort/domainId 会被入参覆盖，
+ * 双 hash、rawMarkdown、parseState、status、deletedAt、身份列一律沿用库里既有值
+ * （清单与理由见 appsvc.SaveApiEntry）。前端：SaveApiEntry(entry)
+ * @param {store$0.ApiEntry} entry
+ * @returns {$CancellablePromise<void>}
+ */
+export function SaveApiEntry(entry) {
+    return $Call.ByID(3558695828, entry);
 }
 
 /**
@@ -279,17 +483,30 @@ export function TestSSH(ip, port, user, password) {
 }
 
 // Private type creation functions
-const $$createType0 = store$0.Message.createFrom;
-const $$createType1 = $Create.Array($$createType0);
-const $$createType2 = appsvc$0.PgSettingsView.createFrom;
-const $$createType3 = appsvc$0.SettingsView.createFrom;
-const $$createType4 = store$0.AgentRow.createFrom;
-const $$createType5 = $Create.Array($$createType4);
-const $$createType6 = appsvc$0.AgentDetail.createFrom;
-const $$createType7 = $Create.Array($$createType6);
-const $$createType8 = store$0.DeployFlow.createFrom;
-const $$createType9 = $Create.Array($$createType8);
-const $$createType10 = store$0.Session.createFrom;
-const $$createType11 = $Create.Array($$createType10);
-const $$createType12 = appsvc$0.SkillInfo.createFrom;
-const $$createType13 = $Create.Array($$createType12);
+const $$createType0 = appsvc$0.ApiDocImportResult.createFrom;
+const $$createType1 = appsvc$0.ApiChangeEventDetail.createFrom;
+const $$createType2 = appsvc$0.ApiEntryDetail.createFrom;
+const $$createType3 = store$0.Message.createFrom;
+const $$createType4 = $Create.Array($$createType3);
+const $$createType5 = appsvc$0.PgSettingsView.createFrom;
+const $$createType6 = appsvc$0.SettingsView.createFrom;
+const $$createType7 = store$0.AgentRow.createFrom;
+const $$createType8 = $Create.Array($$createType7);
+const $$createType9 = appsvc$0.AgentDetail.createFrom;
+const $$createType10 = $Create.Array($$createType9);
+const $$createType11 = store$0.ApiChangeEvent.createFrom;
+const $$createType12 = $Create.Array($$createType11);
+const $$createType13 = $Create.Array($Create.Any);
+const $$createType14 = store$0.ApiDomain.createFrom;
+const $$createType15 = $Create.Array($$createType14);
+const $$createType16 = store$0.ApiEntry.createFrom;
+const $$createType17 = $Create.Array($$createType16);
+const $$createType18 = store$0.ApiProject.createFrom;
+const $$createType19 = $Create.Array($$createType18);
+const $$createType20 = store$0.DeployFlow.createFrom;
+const $$createType21 = $Create.Array($$createType20);
+const $$createType22 = store$0.Session.createFrom;
+const $$createType23 = $Create.Array($$createType22);
+const $$createType24 = appsvc$0.SkillInfo.createFrom;
+const $$createType25 = $Create.Array($$createType24);
+const $$createType26 = appsvc$0.ApiDocImportPreview.createFrom;
