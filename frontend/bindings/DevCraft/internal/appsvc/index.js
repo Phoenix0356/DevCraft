@@ -7,6 +7,7 @@ export {
     AgentSkillInfo,
     ApiChangeEventDetail,
     ApiDocChangePreview,
+    ApiDocFix,
     ApiDocImportPreview,
     ApiDocImportRequest,
     ApiDocImportResult,

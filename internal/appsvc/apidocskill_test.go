@@ -7,8 +7,9 @@ package appsvc
 //   ① 规范文档经技能路径导入成功并生成事件 → TestApiDocSkillImportWritesAndEmitsEvent
 //   ② 含删除的文档走审批闸：未批准时 9 张表零残留，批准后写入 → TestApiDocSkillApprovalGate
 //   ③ E-* 文档被拒且零残留 → TestApiDocSkillRejectionZeroResidue
-//   ④ 技能路径无法触发 init（scope: init 被拒收，哪怕服务层闸门会放行）
-//      → TestApiDocSkillCannotTriggerInit
+//   ④ 技能路径无法触发 init（文档自声明 scope: init 被服务层档位权威闸拒收，
+//      而同一份文档在勾选了初始化模式的向导请求下可以合法灌库）
+//      → TestApiDocSkillCannotTriggerInit（§13.26）
 //   ⑤ 正文衍生物经 sanitize 后才入 LLM → TestApiDocSkillMasksSecretsIntoLLM
 //   ⑥ AC9 同源：技能交付的规范文本与 ExportApiDocSpec / apidoc.SpecText 逐字节相等
 //      → TestApiDocSkillSpecSameSourceAsUIExport
@@ -324,35 +325,44 @@ func TestApiDocSkillRejectionZeroResidue(t *testing.T) {
 	assertApiTablesZero(t)
 }
 
-// ===================== ④ chat 路径无法触发 init =====================
+// ===================== ④ chat 路径无法触发 init（§13.26 档位权威闸）=====================
 
 func TestApiDocSkillCannotTriggerInit(t *testing.T) {
 	svc := newTestService(t)
 	attachApiDocSkills(t, svc)
-	// 空项目 + scope: init：服务层闸门是放行的（界面向导正是靠这两条合法灌库），
-	// 所以「chat 拒绝 init」必须由技能路径自己的闸保证——本用例钉的就是这个差集。
+	// 空项目 + 文档自声明 scope: init：服务层在「勾选初始化模式」时是放行的（界面向导正是靠
+	// 勾选 + 空项目这两条合法灌库），而技能请求的 InitMode 恒 false ⇒ 档位权威闸（§13.26）
+	// 在编排层就把这份文档拒了，根本走不到 §13.12 的 init 闸门去按项目状态裁决。
 	initDoc := "# 演示服务存量文档\n\n```apidoc-meta\nspec: 1\nproject: init-svc\nscope: init\n```\n\n" +
 		"## 一、用户管理\n\n" +
 		"### 1.1 查询用户\n\n- **URL**：`GET /api/v1/demo/user`\n\n" +
 		"#### 请求参数\n\n| 参数名 | 类型 | 必填 | 说明 |\n|---|---|---|---|\n| id | Long | 是 | 用户ID |\n"
 	path := writeDocFile(t, initDoc)
 
-	// 先证明服务层此时是允许 init 的（否则本用例就没意义了）
-	pv, err := svc.PreviewApiDocImport(ApiDocImportRequest{DocText: initDoc})
+	// 前置①：同一份文档，向导勾选初始化 → 服务层放行（否则本用例就没意义了）
+	pv, err := svc.PreviewApiDocImport(ApiDocImportRequest{DocText: initDoc, InitMode: true})
 	if err != nil {
 		t.Fatalf("PreviewApiDocImport: %v", err)
 	}
 	if pv.Mode != apidoc.ModeInit || pv.InitBlocked || !pv.OK {
-		t.Fatalf("前置条件不成立：服务层应允许空项目 init，实际 %+v", pv)
+		t.Fatalf("前置条件不成立：勾选初始化的向导请求应允许空项目 init，实际 %+v", pv)
+	}
+	// 前置②：未勾选（= 技能通道的 InitMode）→ 档位权威闸在编排层就拒，不依赖技能层第二道闸
+	pvNo, err := svc.PreviewApiDocImport(ApiDocImportRequest{DocText: initDoc})
+	if err != nil {
+		t.Fatalf("PreviewApiDocImport: %v", err)
+	}
+	if pvNo.OK || !strings.Contains(pvNo.Message, "基线导入") {
+		t.Fatalf("未勾选的 scope: init 文档必须被档位权威闸拦住：ok=%v msg=%q notes=%v", pvNo.OK, pvNo.Message, pvNo.Notes)
 	}
 
 	out, err := runApiDocSkill(t, svc, skillSessionCtx(), skillapidoc.SkillImport, map[string]any{"path": path})
-	if err == nil || !strings.Contains(err.Error(), "init") {
-		t.Fatalf("chat 路径必须拒绝 init: err=%v out=%s", err, out)
+	if err == nil || !strings.Contains(err.Error(), "基线导入") {
+		t.Fatalf("chat 路径必须拒绝 init（§13.26 档位权威闸在编排层就拦住，技能层那道 init 闸退成第二道保险）: err=%v out=%s", err, out)
 	}
 	assertApiTablesZero(t)
 
-	// 对照：界面向导路径照样能灌（同一套方法，闸门只卡入口身份）
+	// 对照：界面向导路径（勾选初始化）照样能灌（同一套方法，闸门只卡勾选位与项目状态）
 	res := commitApiDoc(t, svc, ApiDocImportRequest{DocText: initDoc, InitMode: true})
 	if res.EventID != 0 || res.Mode != apidoc.ModeInit {
 		t.Fatalf("向导 init 应灌库且不产事件: %+v", res)

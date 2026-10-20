@@ -9,9 +9,9 @@
 //  1. 技能路径不另写解析器：Check/Commit 直接复用界面向导同一对方法
 //     PreviewApiDocImport / CommitApiDocImport（PRD D8），E-*/W-*/双 hash/diff
 //     的判定权全在 internal/apidoc，这里只做类型投影；
-//  2. chat 路径永远 InitMode=false 且 AllowInitOnNonEmpty=false（spec-draft §13.18）——
-//     初始化灌库只属于界面向导；技能侧另有第二道闸（解析结果为 init 即拒执行），
-//     本层不给任何放行键；
+//  2. chat 路径永远 InitMode=false 且 AllowInitOnNonEmpty=false（spec-draft §13.26）——
+//     初始化灌库只属于界面向导：档位权威闸让「文档自声明 scope: init」在未勾选时一律被
+//     服务层拒收，技能侧另有第二道闸（解析结果为 init 即拒执行），本层不给任何放行键；
 //  3. 破坏性/删除必须过审批闸（D16）：needConfirm 为真时只创建待审批单并推卡片帧，
 //     未批准绝不调用 CommitApiDocImport。审批闸的形状（取出即删除的单次消费门禁 +
 //     惰性回收 + 异步执行 + panic 兜底）照搬 deploy.go:83-142 与 deploy.go:200-276，
@@ -365,9 +365,14 @@ func (s *Service) MigrateApiDocSkills() error {
 // ===================== 类型投影与闸门口径 ====================
 
 // apiDocSkillRequest 把技能侧输入拼成编排层请求。
-// InitMode 与 AllowInitOnNonEmpty 在这里硬编码为 false（spec-draft §13.18）：
-// chat 路径没有任何初始化导入的放行键，即使文档自己声明 scope: init 也会被
-// 服务层的 init 闸门按项目状态裁决，技能层再拒一次（双闸）。
+// InitMode 与 AllowInitOnNonEmpty 在这里硬编码为 false（spec-draft §13.26）：
+// chat 路径没有任何初始化导入的放行键。§13.26 的档位权威闸使「文档自声明 scope: init」
+// 在 InitMode=false 时被服务层直接拒收（此前只有附件通道守住，向导与技能都漏着），
+// 技能层那道「解析结果为 init 即拒执行」仍是第二道闸（双闸不删）。
+// ⚠️ 任务 10-20 D6 只放宽「聊天附件通道」（前端直接调 PreviewApiDocImport/CommitApiDocImport，
+// 不经模型，InitMode=附件条「基线导入」勾选位）；本函数对应的模型驱动 apidoc_import 技能工具
+// 保持拒绝 init 一字不改——§13.26 防的就是「文档自声明 init 逃逸校验」。
+// AutoFix 同为 false 零值：模型驱动的导入不做机械改写，修复器只属于附件这条确定性通道。
 func apiDocSkillRequest(in skillapidoc.ImportInput, confirmed bool) ApiDocImportRequest {
 	return ApiDocImportRequest{
 		DocText:             in.DocText,

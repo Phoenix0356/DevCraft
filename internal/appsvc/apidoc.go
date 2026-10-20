@@ -53,9 +53,10 @@ type ApiDocImportRequest struct {
 	DocText             string              `json:"docText"`             // 文档全文（必填）
 	DocRef              string              `json:"docRef"`              // 来源路径（可空，仅溯源）
 	ProjectName         string              `json:"projectName"`         // 覆盖 meta.project（空则用 meta 值）
-	InitMode            bool                `json:"initMode"`            // 界面向导「初始化模式」勾选：文档缺 meta.scope 时按 init 解析
+	InitMode            bool                `json:"initMode"`            // ⚠️ 解析档位的唯一权威（spec-draft §13.26，取代 §13.18）：界面向导「初始化模式」勾选 / 聊天附件条「基线导入」勾选 / 技能通道恒 false。文档声明 scope 与它不一致（任一向）一律拒收；仅当文档**没有** meta.scope 时它决定兜底档位
 	Confirmed           bool                `json:"confirmed"`           // 破坏性/删除的二次确认标记（D16 服务层强制）
-	AllowInitOnNonEmpty bool                `json:"allowInitOnNonEmpty"` // 允许对非空项目执行 init（§13.12 闸门放行键）
+	AllowInitOnNonEmpty bool                `json:"allowInitOnNonEmpty"` // 允许对非空项目执行 init（§13.12 闸门放行键）。⚠️ 聊天附件通道恒传 false——§13.12「init 只允许空项目」的后端闸门语义一字不改（D6 只放宽「不再在入口硬拒 chat」）；模型驱动的 apidoc_import 技能工具在 apiDocSkillRequest 里硬编码 false，不给任何放行键（§13.18）
+	AutoFix             bool                `json:"autoFix"`             // 聊天附件通道（任务 10-20）：先跑确定性修复器 apidoc.Repair 再重新完整校验（D2/D4）；界面向导不勾选=行为完全不变；技能通道永不置真（模型驱动的导入不做机械改写）
 	DomainOverrides     []ApiDomainOverride `json:"domainOverrides"`     // 领域改名/合并
 	Title               string              `json:"title"`               // 覆盖 meta.change_title（空则用 meta 值）
 	Reason              string              `json:"reason"`              // 覆盖 meta.change_note
@@ -112,7 +113,21 @@ type ApiDocMetaPreview struct {
 	VersionTag  string `json:"versionTag"`  // 需求单号/发布标签（事件 label，D7）
 }
 
+// ApiDocFix 确定性修复器（apidoc.Repair）的一处机械修复（任务 10-20，PRD D2/D4）。
+// 卡片逐条展示：第几行、改了什么、是否待人工核对、为什么改。修复只允许白名单四类
+// （bullet-form / fence-close / pos-column / cross-ref-expand）；语义问题不出现在这里，
+// 只出现在剩余 Issues 清单里。Kind/Line 坐标系约定见 internal/apidoc/repair.go 文件头。
+type ApiDocFix struct {
+	Kind        string `json:"kind"`
+	Line        int    `json:"line"`
+	Before      string `json:"before"`
+	After       string `json:"after"`
+	NeedsReview bool   `json:"needsReview"` // 推断类（补位置列 / 搬运含推断列的表）恒 true，沿用 §10 W-POS-INFERRED 语义
+	Note        string `json:"note"`
+}
+
 // ApiDocImportPreview 导入预览（只读产物；「文档自身问题」与「变更」分栏，PRD Risk 5）。
+// Fixes 仅在请求带 AutoFix（聊天附件通道）时非空：修复清单必须可见，不能静默改完就导（D4）。
 type ApiDocImportPreview struct {
 	OK          bool                  `json:"ok"`          // 可否进入提交（无 E-* 且未被 init 闸门拦截）
 	NeedConfirm bool                  `json:"needConfirm"` // 提交时必须带 confirmed=true（D16）
@@ -123,7 +138,9 @@ type ApiDocImportPreview struct {
 	NextSeq     int                   `json:"nextSeq"` // 将分配的事件版本号（0 = 本次不生成事件）
 	Meta        ApiDocMetaPreview     `json:"meta"`
 	Stats       ApiDocImportStats     `json:"stats"`
-	Issues      []apidoc.Issue        `json:"issues"`  // 文档自身 bug + 与库矛盾（E-*/W-*，含行号）
+	Issues      []apidoc.Issue        `json:"issues"`  // 文档自身 bug + 与库矛盾（E-*/W-*，含行号；AutoFix 时为修复后重新完整校验的剩余问题）
+	Fixes       []ApiDocFix           `json:"fixes"`   // 已自动修复清单（未启用 AutoFix = 空数组）
+	FixedText   string                `json:"fixedText"` // 修复稿全文（D7/AC6「下载修正后的 md」的数据源）：仅 AutoFix 通道非空；本轮零修复时 = 原文（前端按 fixes 是否为空决定要不要给下载按钮）。未启用 AutoFix = 空串（零指针约定）
 	Changes     []ApiDocChangePreview `json:"changes"` // 变更分栏
 	Domains     []ApiDomainCandidate  `json:"domains"`
 	Notes       []string              `json:"notes"`   // 中文提示（幂等重导的陈旧声明等，不新增错误码）
@@ -133,6 +150,8 @@ type ApiDocImportPreview struct {
 // ApiDocImportResult 提交结果。EventID/Seq 为 0 = 本次未生成事件（哨兵，零指针约定）。
 // Notes/CreatedProject/CreatedDomains 让结果卡能如实说清「本次新建了什么、幂等短路时降级了什么提示」，
 // 语义与预览的 notes 同源（陈旧声明降级、init 闸门提示等）。
+// FixCount 为本次 AutoFix 通道实际应用的机械修复数（0 = 未启用或文档无需修复）；
+// 修复清单全文随事件 meta.fixes 落库（事件不生成时不落），结果卡要显示「已自动修复 N 处」。
 type ApiDocImportResult struct {
 	EventID        int64             `json:"eventId"`
 	Seq            int               `json:"seq"`
@@ -140,6 +159,8 @@ type ApiDocImportResult struct {
 	Mode           string            `json:"mode"`
 	Breaking       int               `json:"breaking"`
 	Stats          ApiDocImportStats `json:"stats"`
+	FixCount       int               `json:"fixCount"`       // 已自动修复处数（AutoFix 通道）
+	FixedText      string            `json:"fixedText"`      // 实际入库的那份文本全文 = 修复稿（D7/AC6：结果卡可下载；未启用 AutoFix = 空串）
 	Notes          []string          `json:"notes"`          // 中文提示（与预览同源；无提示 = 空数组）
 	CreatedProject bool              `json:"createdProject"` // 本次是否新建了项目
 	CreatedDomains []string          `json:"createdDomains"` // 本次新建的领域终名（含 DomainOverrides 改名/合并后）
@@ -241,6 +262,7 @@ func (s *Service) ExportApiDocSpec() (string, error) {
 func (s *Service) PreviewApiDocImport(req ApiDocImportRequest) (ApiDocImportPreview, error) {
 	pv := ApiDocImportPreview{
 		Issues:  []apidoc.Issue{},
+		Fixes:   []ApiDocFix{},
 		Changes: []ApiDocChangePreview{},
 		Domains: []ApiDomainCandidate{},
 		Notes:   []string{},
@@ -248,13 +270,29 @@ func (s *Service) PreviewApiDocImport(req ApiDocImportRequest) (ApiDocImportPrev
 	if strings.TrimSpace(req.DocText) == "" {
 		return pv, fmt.Errorf("文档内容不能为空")
 	}
+	// AutoFix（聊天附件通道）：先跑确定性修复器，再按修复稿重新完整校验（D3/D4）。
+	// 修复清单进 pv.Fixes；修复稿全文进 pv.FixedText（下载修正稿用，D7/AC6）；
+	// 剩余 E-*/W-* 照常进 pv.Issues。
+	fixed, fixes := apiDocApplyAutoFix(req)
+	req.DocText = fixed
+	pv.Fixes = fixes
+	if req.AutoFix {
+		pv.FixedText = fixed
+	}
 	doc := apidoc.Parse(req.DocText, apiDocParseOptions(req))
 	pv.Mode = doc.Mode
 	pv.Meta = apiDocMetaPreview(doc) // 文档自己声明的 meta 原样回显（校验失败也要给，用户得知道文档写了啥）
-	projectName := apiDocProjectName(req, doc)
-	pv.ProjectName = projectName
+	pv.ProjectName = apiDocProjectName(req, doc)
 	pv.Issues = append(pv.Issues, doc.Issues...)
 	pv.Domains = apiDomainCandidates(doc, req.DomainOverrides)
+	if deny := apiDocInitAuthority(req, doc); deny != "" {
+		// §13.26：解析档位以请求标志为唯一权威，双向冲突一律拒收（所有通道同一条闸）。
+		// 拒绝时把文档声明的 scope 一并回显 + 指路怎么放行，不能只丢一句错误。
+		pv.Notes = append(pv.Notes, deny)
+		pv.Message = "解析档位与勾选冲突，已拒绝导入（基线导入 / 初始化模式需显式勾选）"
+		return pv, nil
+	}
+	projectName := pv.ProjectName
 	if doc.HasErrors() {
 		pv.Message = fmt.Sprintf("文档校验未通过，共 %d 个阻断问题", len(doc.Errors()))
 		return pv, nil
@@ -293,6 +331,16 @@ func (s *Service) PreviewApiDocImport(req ApiDocImportRequest) (ApiDocImportPrev
 // （seq = MAX(seq)+1 同事务）→ 明细 → 导入批次。任一步失败整体回滚（AC3 零残留）。
 //
 // 强制闸门（全部在服务层，chat 路径也绕不过去）：
+//  0. AutoFix（聊天附件通道）先跑确定性修复器再重新完整校验（D3/D4），修复稿全文随
+//     结果卡的 fixedText 带回前端（D7/AC6 下载修正稿，不写回原文件）；
+//  0.5 解析档位权威闸（§13.26，取代 §13.18）：req.InitMode 是档位的唯一权威——
+//     文档自声明 scope: init 而未勾选 → 拒收；勾选了而文档声明 incremental/full →
+//     同样拒收；文档无 meta.scope 时勾选才决定兜底档位。**所有通道同一条闸**，
+//     界面向导与模型驱动技能都不再能被文档自声明绕过严格校验。
+//     ⚠️ §13.12 的 init 闸门（下面第 3 条）语义一字未动：附件通道 AllowInitOnNonEmpty 恒
+//     false；模型驱动的 apidoc_import 技能工具（apiDocSkillRequest）仍硬编码两个 init 键为
+//     false 并保持「解析结果为 init 即拒执行」那道第二道闸——本闸让它「聊天拒绝 init」的意图
+//     真正成立（此前只有附件通道守住），本次不放宽、不改错对象；
 //  1. 任何 E-* issue → 拒收（错误信息带前若干条 code+行号+want），零写入；
 //  2. needConfirm（聚合 breaking ∈ {1,2} 或明细含 removed）且未 confirmed → 拒写（D16）；
 //  3. scope:init 仅当项目下无任何 active 条目或 AllowInitOnNonEmpty 时放行（§13.12）；
@@ -302,7 +350,17 @@ func (s *Service) CommitApiDocImport(req ApiDocImportRequest) (ApiDocImportResul
 	if strings.TrimSpace(req.DocText) == "" {
 		return ApiDocImportResult{}, fmt.Errorf("文档内容不能为空")
 	}
+	// AutoFix（聊天附件通道）：与 Preview 调用同一个 apidoc.Repair（确定性 → 两边修复
+	// 结果必然一致），随后按修复稿重新完整校验；入库文本 = 修复稿本身，
+	// doc_fingerprint / 事件 doc_text 全部对应修复稿（AC7：不存在第三份"AI 改写版"）。
+	fixed, fixes := apiDocApplyAutoFix(req)
+	req.DocText = fixed
 	doc := apidoc.Parse(req.DocText, apiDocParseOptions(req))
+	if deny := apiDocInitAuthority(req, doc); deny != "" {
+		slog.Warn("接口文档导入被拒：解析档位与勾选冲突", "project", apiDocProjectName(req, doc),
+			"declared", doc.Meta.Scope, "initMode", req.InitMode, "autoFix", req.AutoFix)
+		return ApiDocImportResult{}, errors.New(deny)
+	}
 	if doc.HasErrors() {
 		slog.Warn("接口文档导入被拒：解析校验未通过", "project", apiDocProjectName(req, doc),
 			"mode", doc.Mode, "errors", len(doc.Errors()))
@@ -322,8 +380,16 @@ func (s *Service) CommitApiDocImport(req ApiDocImportRequest) (ApiDocImportResul
 	reason := apiDocFirstNonEmpty(strings.TrimSpace(req.Reason), doc.Meta.ChangeNote)
 	fingerprint := apiDocFingerprint(req.DocText)
 
-	// Notes/CreatedDomains 预置空切片：JS 侧要拿到 [] 而不是 null（仓库 DTO 约定）。
-	res := ApiDocImportResult{Notes: []string{}, CreatedDomains: []string{}}
+	// 修复清单要能在 commit 之后仍然可见：序列化进事件 meta（api_change_events 的 JSON
+	// 扩展槽——api_import_batches 没有 meta 列，而 §13 纪律是不给老表加列）。
+	// init 导入不生成事件（R10），此时批次行的 doc_fingerprint 仍记录修复稿的 sha256，
+	// 修复明细只随预览/结果卡在会话里呈现（AC7 断言面见 apiDocEventMeta）。
+	res := ApiDocImportResult{Notes: []string{}, CreatedDomains: []string{}, FixCount: len(fixes)}
+	// 修正稿全文随结果卡带回前端（D7/AC6「下载修正后的 md」）：入参已经是修复稿，
+	// 所以这里给出去的就是真正落库的那份字节（与 doc_fingerprint / 事件 doc_text 同源）。
+	if req.AutoFix {
+		res.FixedText = fixed
+	}
 	err := s.store.WithTx(func(tx *store.Tx) error {
 		// 规划（事务内读，读到自己未提交的写；绝不触碰 Store 方法，§13.14）
 		plan, err := s.planApiDocImport(tx, req, doc, projectName)
@@ -424,8 +490,8 @@ func (s *Service) CommitApiDocImport(req ApiDocImportRequest) (ApiDocImportResul
 				ScopeMode: plan.mode,
 				Stats: store.ApiEventStats{Added: plan.stats.Added, Updated: plan.stats.Updated,
 					Removed: plan.stats.Removed, Moved: plan.stats.Moved, Restored: plan.stats.Restored},
-				Meta:    map[string]any{"docSha256": fingerprint},
-				DocText: req.DocText, // D12：输入凭证，全文留档
+				Meta:    apiDocEventMeta(fingerprint, fixes),
+				DocText: req.DocText, // D12：输入凭证，全文留档（AutoFix 通道 = 修复稿本身）
 			}
 			if err := tx.InsertApiChangeEvent(&ev); err != nil {
 				return fmt.Errorf("写入变更事件失败: %w", err)
@@ -1223,13 +1289,70 @@ func apiDocMetaPreview(doc *apidoc.Document) ApiDocMetaPreview {
 	}
 }
 
-// apiDocParseOptions 解析模式：向导勾选初始化 → init 兜底（meta.scope 存在时仍以 meta 优先，
-// apidoc.resolveMode 已实现）；否则规范严格模式。
+// apiDocParseOptions 请求标志 → 解析兜底档位：勾选初始化 → init，否则规范严格模式。
+// ⚠️ 解析器内部仍是「meta.scope 优先」（apidoc.resolveMode，本次不动解析器），
+// 所以这里的 opts.Mode 只是「文档没写 scope 时」的兜底；一旦 meta.scope 与请求标志
+// 冲突，由 apiDocInitAuthority 在请求层拒收（§13.26），不做静默取舍。
 func apiDocParseOptions(req ApiDocImportRequest) apidoc.Options {
 	if req.InitMode {
 		return apidoc.Options{Mode: apidoc.ModeInit}
 	}
 	return apidoc.Options{Mode: apidoc.ModeIncremental}
+}
+
+// apiDocApplyAutoFix 聊天附件通道的确定性修复前置（任务 10-20，D3/D4/D5）：
+// AutoFix 为真时调用 apidoc.Repair —— Preview 与 Commit 调的是同一个纯函数、同一份输入，
+// 确定性保证两边结果必然一致（不存在「预览修 A、提交修 B」的第二份实现）。
+// 修复后必须重新完整校验（D4）：调用方拿着返回的文本照常 Parse，修完仍有 E-* 一律拒收。
+// 未勾选 AutoFix 时原样返回，界面向导与技能通道的行为一个字节都不变。
+func apiDocApplyAutoFix(req ApiDocImportRequest) (string, []ApiDocFix) {
+	if !req.AutoFix {
+		return req.DocText, []ApiDocFix{}
+	}
+	fixed, fixes, _ := apidoc.Repair(req.DocText)
+	out := make([]ApiDocFix, 0, len(fixes))
+	for _, f := range fixes {
+		out = append(out, ApiDocFix{Kind: f.Kind, Line: f.Line, Before: f.Before,
+			After: f.After, NeedsReview: f.NeedsReview, Note: f.Note})
+	}
+	return fixed, out
+}
+
+// apiDocInitAuthority 解析档位的权威闸（spec-draft §13.26，取代 §13.18 的分工说法）：
+// **请求标志 req.InitMode 是档位的唯一权威**，文档 meta 的 scope 不许覆盖它。
+// 解析器 apidoc.resolveMode 仍然「meta 优先」（它不该知道调用方是谁，本次不动解析器），
+// 冲突判定落在请求层（本函数），Preview 与 Commit 两条路径共用同一判据。
+//
+// 为什么必须有这道闸（实测过的漏洞）：`resolveMode` 里 meta.scope 覆盖请求标志，于是
+// 只要文档自声明 `scope: init`，即使界面的「初始化模式」勾选框根本没勾，也照样拿到宽松
+// 解析、跳过 `位置` 列与变更声明等严格校验——界面向导与模型驱动技能都漏着。
+//
+// 三条规则（双向对称，否则勾选形同虚设）：
+//   - 文档声明 init 而 req.InitMode == false → 拒收；
+//   - req.InitMode == true 而文档声明 incremental/full → 同样拒收；
+//   - 文档**没有** meta.scope（现存散文文档）→ 由 req.InitMode 决定档位，不拒。
+//
+// 效果：模型驱动的 apidoc_import 技能 InitMode 恒 false（apiDocSkillRequest），于是
+// 「聊天拒绝 init」由本闸自动成立，不再依赖技能层那第二道闸（§13.18 的意图由此兑现）。
+// 校验只判「声明 vs 勾选」的冲突，档位合法性与 §13.12 的 init 空项目闸门各自独立不动。
+// 返回非空字符串 = 拒绝理由（中文短句，前端原样展示）。
+func apiDocInitAuthority(req ApiDocImportRequest, doc *apidoc.Document) string {
+	declared := strings.TrimSpace(doc.Meta.Scope)
+	if declared != apidoc.ModeInit && declared != apidoc.ModeIncremental && declared != apidoc.ModeFull {
+		return "" // 文档没声明合法 scope（散文文档 / 非法值）：档位就是请求标志给的档位
+	}
+	if declared == apidoc.ModeInit && !req.InitMode {
+		return "解析档位冲突：文档声明 scope: init，但界面未勾选初始化/基线导入模式，已拒绝导入。" +
+			"档位以请求标志为唯一权威（spec-draft §13.26，文档自声明不再能绕过严格校验）——" +
+			"要按基线导入请勾选界面向导的「初始化模式」或聊天附件条的「基线导入」（仍受「init 只允许空项目」闸门约束）；" +
+			"若这份文档本应是增量变更，请把 meta 的 scope 改为 incremental 或删掉该行"
+	}
+	if req.InitMode && declared != apidoc.ModeInit {
+		return "解析档位冲突：界面已勾选初始化/基线导入模式，但文档声明 scope: " + declared + "，已拒绝导入。" +
+			"档位以请求标志为唯一权威（spec-draft §13.26），两者不一致时不做静默取舍——" +
+			"请取消勾选以按文档声明导入，或让作者把 meta 的 scope 改为 init（无 meta 的存量散文文档才只由勾选决定档位）"
+	}
+	return ""
 }
 
 // apiDocProjectName 项目名：请求覆盖 > meta.project（D13）。
@@ -1247,9 +1370,26 @@ func apiDocFirstNonEmpty(vals ...string) string {
 }
 
 // apiDocFingerprint 文档 sha256（批次表 doc_fingerprint，幂等第二道保险）。
+// AutoFix 通道下入参已是修复稿 → 指纹/事件 doc_text/落库内容三者同源（AC7：
+// 测试比对 sha256(修复稿) == api_import_batches.doc_fingerprint == 事件 meta.docSha256，
+// 证明入库的就是文件原文经确定性修复后的文本本身，不存在第三份"AI 改写版"）。
 func apiDocFingerprint(text string) string {
 	sum := sha256.Sum256([]byte(text))
 	return hex.EncodeToString(sum[:])
+}
+
+// apiDocEventMeta 事件 meta JSON 扩展槽（api_change_events.meta，§13 不给老表加列）：
+// docSha256 恒有；AutoFix 通道实际应用过修复时追加 autoFix/fixes/fixCount，
+// 让修复清单在 commit 之后仍可从事件详情回读（init 导入不生成事件，修复明细
+// 只随预览/结果卡呈现——批次行的 doc_fingerprint 仍对应修复稿）。
+func apiDocEventMeta(fingerprint string, fixes []ApiDocFix) map[string]any {
+	meta := map[string]any{"docSha256": fingerprint}
+	if len(fixes) > 0 {
+		meta["autoFix"] = true
+		meta["fixes"] = fixes
+		meta["fixCount"] = len(fixes)
+	}
+	return meta
 }
 
 func apiDocDeclaredKeys(doc *apidoc.Document) []string {

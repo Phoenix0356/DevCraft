@@ -311,7 +311,78 @@ export class ApiDocChangePreview {
 }
 
 /**
+ * ApiDocFix 确定性修复器（apidoc.Repair）的一处机械修复（任务 10-20，PRD D2/D4）。
+ * 卡片逐条展示：第几行、改了什么、是否待人工核对、为什么改。修复只允许白名单四类
+ * （bullet-form / fence-close / pos-column / cross-ref-expand）；语义问题不出现在这里，
+ * 只出现在剩余 Issues 清单里。Kind/Line 坐标系约定见 internal/apidoc/repair.go 文件头。
+ */
+export class ApiDocFix {
+    /**
+     * Creates a new ApiDocFix instance.
+     * @param {Partial<ApiDocFix>} [$$source = {}] - The source object to create the ApiDocFix.
+     */
+    constructor($$source = {}) {
+        if (!("kind" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["kind"] = "";
+        }
+        if (!("line" in $$source)) {
+            /**
+             * @member
+             * @type {number}
+             */
+            this["line"] = 0;
+        }
+        if (!("before" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["before"] = "";
+        }
+        if (!("after" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["after"] = "";
+        }
+        if (!("needsReview" in $$source)) {
+            /**
+             * 推断类（补位置列 / 搬运含推断列的表）恒 true，沿用 §10 W-POS-INFERRED 语义
+             * @member
+             * @type {boolean}
+             */
+            this["needsReview"] = false;
+        }
+        if (!("note" in $$source)) {
+            /**
+             * @member
+             * @type {string}
+             */
+            this["note"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new ApiDocFix instance from a string or object.
+     * @param {any} [$$source = {}]
+     * @returns {ApiDocFix}
+     */
+    static createFrom($$source = {}) {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new ApiDocFix(/** @type {Partial<ApiDocFix>} */($$parsedSource));
+    }
+}
+
+/**
  * ApiDocImportPreview 导入预览（只读产物；「文档自身问题」与「变更」分栏，PRD Risk 5）。
+ * Fixes 仅在请求带 AutoFix（聊天附件通道）时非空：修复清单必须可见，不能静默改完就导（D4）。
  */
 export class ApiDocImportPreview {
     /**
@@ -390,11 +461,27 @@ export class ApiDocImportPreview {
         }
         if (!("issues" in $$source)) {
             /**
-             * 文档自身 bug + 与库矛盾（E-* /W-*，含行号）
+             * 文档自身 bug + 与库矛盾（E-* /W-*，含行号；AutoFix 时为修复后重新完整校验的剩余问题）
              * @member
              * @type {apidoc$0.Issue[]}
              */
             this["issues"] = [];
+        }
+        if (!("fixes" in $$source)) {
+            /**
+             * 已自动修复清单（未启用 AutoFix = 空数组）
+             * @member
+             * @type {ApiDocFix[]}
+             */
+            this["fixes"] = [];
+        }
+        if (!("fixedText" in $$source)) {
+            /**
+             * 修复稿全文（D7/AC6「下载修正后的 md」的数据源）：仅 AutoFix 通道非空；本轮零修复时 = 原文（前端按 fixes 是否为空决定要不要给下载按钮）。未启用 AutoFix = 空串（零指针约定）
+             * @member
+             * @type {string}
+             */
+            this["fixedText"] = "";
         }
         if (!("changes" in $$source)) {
             /**
@@ -441,8 +528,9 @@ export class ApiDocImportPreview {
         const $$createField8_0 = $$createType8;
         const $$createField9_0 = $$createType10;
         const $$createField10_0 = $$createType12;
-        const $$createField11_0 = $$createType14;
-        const $$createField12_0 = $$createType15;
+        const $$createField12_0 = $$createType14;
+        const $$createField13_0 = $$createType16;
+        const $$createField14_0 = $$createType17;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("meta" in $$parsedSource) {
             $$parsedSource["meta"] = $$createField7_0($$parsedSource["meta"]);
@@ -453,14 +541,17 @@ export class ApiDocImportPreview {
         if ("issues" in $$parsedSource) {
             $$parsedSource["issues"] = $$createField9_0($$parsedSource["issues"]);
         }
+        if ("fixes" in $$parsedSource) {
+            $$parsedSource["fixes"] = $$createField10_0($$parsedSource["fixes"]);
+        }
         if ("changes" in $$parsedSource) {
-            $$parsedSource["changes"] = $$createField10_0($$parsedSource["changes"]);
+            $$parsedSource["changes"] = $$createField12_0($$parsedSource["changes"]);
         }
         if ("domains" in $$parsedSource) {
-            $$parsedSource["domains"] = $$createField11_0($$parsedSource["domains"]);
+            $$parsedSource["domains"] = $$createField13_0($$parsedSource["domains"]);
         }
         if ("notes" in $$parsedSource) {
-            $$parsedSource["notes"] = $$createField12_0($$parsedSource["notes"]);
+            $$parsedSource["notes"] = $$createField14_0($$parsedSource["notes"]);
         }
         return new ApiDocImportPreview(/** @type {Partial<ApiDocImportPreview>} */($$parsedSource));
     }
@@ -501,7 +592,7 @@ export class ApiDocImportRequest {
         }
         if (!("initMode" in $$source)) {
             /**
-             * 界面向导「初始化模式」勾选：文档缺 meta.scope 时按 init 解析
+             * ⚠️ 解析档位的唯一权威（spec-draft §13.26，取代 §13.18）：界面向导「初始化模式」勾选 / 聊天附件条「基线导入」勾选 / 技能通道恒 false。文档声明 scope 与它不一致（任一向）一律拒收；仅当文档**没有** meta.scope 时它决定兜底档位
              * @member
              * @type {boolean}
              */
@@ -517,11 +608,19 @@ export class ApiDocImportRequest {
         }
         if (!("allowInitOnNonEmpty" in $$source)) {
             /**
-             * 允许对非空项目执行 init（§13.12 闸门放行键）
+             * 允许对非空项目执行 init（§13.12 闸门放行键）。⚠️ 聊天附件通道恒传 false——§13.12「init 只允许空项目」的后端闸门语义一字不改（D6 只放宽「不再在入口硬拒 chat」）；模型驱动的 apidoc_import 技能工具在 apiDocSkillRequest 里硬编码 false，不给任何放行键（§13.18）
              * @member
              * @type {boolean}
              */
             this["allowInitOnNonEmpty"] = false;
+        }
+        if (!("autoFix" in $$source)) {
+            /**
+             * 聊天附件通道（任务 10-20）：先跑确定性修复器 apidoc.Repair 再重新完整校验（D2/D4）；界面向导不勾选=行为完全不变；技能通道永不置真（模型驱动的导入不做机械改写）
+             * @member
+             * @type {boolean}
+             */
+            this["autoFix"] = false;
         }
         if (!("domainOverrides" in $$source)) {
             /**
@@ -573,10 +672,10 @@ export class ApiDocImportRequest {
      * @returns {ApiDocImportRequest}
      */
     static createFrom($$source = {}) {
-        const $$createField6_0 = $$createType17;
+        const $$createField7_0 = $$createType19;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("domainOverrides" in $$parsedSource) {
-            $$parsedSource["domainOverrides"] = $$createField6_0($$parsedSource["domainOverrides"]);
+            $$parsedSource["domainOverrides"] = $$createField7_0($$parsedSource["domainOverrides"]);
         }
         return new ApiDocImportRequest(/** @type {Partial<ApiDocImportRequest>} */($$parsedSource));
     }
@@ -586,6 +685,8 @@ export class ApiDocImportRequest {
  * ApiDocImportResult 提交结果。EventID/Seq 为 0 = 本次未生成事件（哨兵，零指针约定）。
  * Notes/CreatedProject/CreatedDomains 让结果卡能如实说清「本次新建了什么、幂等短路时降级了什么提示」，
  * 语义与预览的 notes 同源（陈旧声明降级、init 闸门提示等）。
+ * FixCount 为本次 AutoFix 通道实际应用的机械修复数（0 = 未启用或文档无需修复）；
+ * 修复清单全文随事件 meta.fixes 落库（事件不生成时不落），结果卡要显示「已自动修复 N 处」。
  */
 export class ApiDocImportResult {
     /**
@@ -635,6 +736,22 @@ export class ApiDocImportResult {
              */
             this["stats"] = (new ApiDocImportStats());
         }
+        if (!("fixCount" in $$source)) {
+            /**
+             * 已自动修复处数（AutoFix 通道）
+             * @member
+             * @type {number}
+             */
+            this["fixCount"] = 0;
+        }
+        if (!("fixedText" in $$source)) {
+            /**
+             * 实际入库的那份文本全文 = 修复稿（D7/AC6：结果卡可下载；未启用 AutoFix = 空串）
+             * @member
+             * @type {string}
+             */
+            this["fixedText"] = "";
+        }
         if (!("notes" in $$source)) {
             /**
              * 中文提示（与预览同源；无提示 = 空数组）
@@ -678,17 +795,17 @@ export class ApiDocImportResult {
      */
     static createFrom($$source = {}) {
         const $$createField5_0 = $$createType8;
-        const $$createField6_0 = $$createType15;
-        const $$createField8_0 = $$createType15;
+        const $$createField8_0 = $$createType17;
+        const $$createField10_0 = $$createType17;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("stats" in $$parsedSource) {
             $$parsedSource["stats"] = $$createField5_0($$parsedSource["stats"]);
         }
         if ("notes" in $$parsedSource) {
-            $$parsedSource["notes"] = $$createField6_0($$parsedSource["notes"]);
+            $$parsedSource["notes"] = $$createField8_0($$parsedSource["notes"]);
         }
         if ("createdDomains" in $$parsedSource) {
-            $$parsedSource["createdDomains"] = $$createField8_0($$parsedSource["createdDomains"]);
+            $$parsedSource["createdDomains"] = $$createField10_0($$parsedSource["createdDomains"]);
         }
         return new ApiDocImportResult(/** @type {Partial<ApiDocImportResult>} */($$parsedSource));
     }
@@ -1031,13 +1148,13 @@ export class ApiEntryDetail {
      * @returns {ApiEntryDetail}
      */
     static createFrom($$source = {}) {
-        const $$createField0_0 = $$createType18;
-        const $$createField1_0 = $$createType20;
-        const $$createField2_0 = $$createType20;
-        const $$createField3_0 = $$createType20;
-        const $$createField4_0 = $$createType22;
-        const $$createField5_0 = $$createType24;
-        const $$createField6_0 = $$createType26;
+        const $$createField0_0 = $$createType20;
+        const $$createField1_0 = $$createType22;
+        const $$createField2_0 = $$createType22;
+        const $$createField3_0 = $$createType22;
+        const $$createField4_0 = $$createType24;
+        const $$createField5_0 = $$createType26;
+        const $$createField6_0 = $$createType28;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("entry" in $$parsedSource) {
             $$parsedSource["entry"] = $$createField0_0($$parsedSource["entry"]);
@@ -1207,8 +1324,8 @@ export class ApiSchemaDetail {
      * @returns {ApiSchemaDetail}
      */
     static createFrom($$source = {}) {
-        const $$createField0_0 = $$createType27;
-        const $$createField1_0 = $$createType20;
+        const $$createField0_0 = $$createType29;
+        const $$createField1_0 = $$createType22;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("schema" in $$parsedSource) {
             $$parsedSource["schema"] = $$createField0_0($$parsedSource["schema"]);
@@ -1278,7 +1395,7 @@ export class PgSettings {
      * @returns {PgSettings}
      */
     static createFrom($$source = {}) {
-        const $$createField4_0 = $$createType15;
+        const $$createField4_0 = $$createType17;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("databases" in $$parsedSource) {
             $$parsedSource["databases"] = $$createField4_0($$parsedSource["databases"]);
@@ -1342,7 +1459,7 @@ export class PgSettingsView {
      * @returns {PgSettingsView}
      */
     static createFrom($$source = {}) {
-        const $$createField4_0 = $$createType15;
+        const $$createField4_0 = $$createType17;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("databases" in $$parsedSource) {
             $$parsedSource["databases"] = $$createField4_0($$parsedSource["databases"]);
@@ -1574,20 +1691,22 @@ const $$createType7 = ApiDocMetaPreview.createFrom;
 const $$createType8 = ApiDocImportStats.createFrom;
 const $$createType9 = apidoc$0.Issue.createFrom;
 const $$createType10 = $Create.Array($$createType9);
-const $$createType11 = ApiDocChangePreview.createFrom;
+const $$createType11 = ApiDocFix.createFrom;
 const $$createType12 = $Create.Array($$createType11);
-const $$createType13 = ApiDomainCandidate.createFrom;
+const $$createType13 = ApiDocChangePreview.createFrom;
 const $$createType14 = $Create.Array($$createType13);
-const $$createType15 = $Create.Array($Create.Any);
-const $$createType16 = ApiDomainOverride.createFrom;
-const $$createType17 = $Create.Array($$createType16);
-const $$createType18 = store$0.ApiEntry.createFrom;
-const $$createType19 = store$0.ApiField.createFrom;
-const $$createType20 = $Create.Array($$createType19);
-const $$createType21 = ApiSchemaDetail.createFrom;
+const $$createType15 = ApiDomainCandidate.createFrom;
+const $$createType16 = $Create.Array($$createType15);
+const $$createType17 = $Create.Array($Create.Any);
+const $$createType18 = ApiDomainOverride.createFrom;
+const $$createType19 = $Create.Array($$createType18);
+const $$createType20 = store$0.ApiEntry.createFrom;
+const $$createType21 = store$0.ApiField.createFrom;
 const $$createType22 = $Create.Array($$createType21);
-const $$createType23 = store$0.ApiExample.createFrom;
+const $$createType23 = ApiSchemaDetail.createFrom;
 const $$createType24 = $Create.Array($$createType23);
-const $$createType25 = store$0.ApiEntryEventRef.createFrom;
+const $$createType25 = store$0.ApiExample.createFrom;
 const $$createType26 = $Create.Array($$createType25);
-const $$createType27 = store$0.ApiSchema.createFrom;
+const $$createType27 = store$0.ApiEntryEventRef.createFrom;
+const $$createType28 = $Create.Array($$createType27);
+const $$createType29 = store$0.ApiSchema.createFrom;
