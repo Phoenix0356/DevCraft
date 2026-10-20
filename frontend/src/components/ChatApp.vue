@@ -14,9 +14,11 @@
 -->
 <script setup>
 // ---------------- 导入 ----------------
-import {ref, computed, nextTick, onMounted, onBeforeUnmount, watch} from 'vue'
+import {ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch} from 'vue'
 // Vue 响应式 API：
 //   ref(x)     = 创建一个"响应式盒子"，.value 变化 → 界面自动重渲染（≈ setState）
+//   reactive   = 把对象本身变成代理（附件结果卡要用：异步回调里逐字段写回卡片状态，
+//                若写成 raw 对象再塞 ref，改的是 raw 目标、绕开代理，界面不会重渲染）
 //   computed   = 派生属性（≈ 只读 getter，依赖变化自动重算）
 //   nextTick   = 等 DOM 更新完成后再执行回调
 //   onMounted / onBeforeUnmount = 生命周期钩子（≈ @PostConstruct / @PreDestroy）
@@ -33,6 +35,7 @@ import {
   NewSession, ListSessions, DeleteSession, GetMessages,
   SendMessage, CancelTurn, ListAgents, ListAgentsDetail, ApproveDeployment, RejectDeployment,
   ApproveApiDocImport, RejectApiDocImport,
+  PreviewApiDocImport, CommitApiDocImport,
   RenameSession
 } from '../../bindings/DevCraft/app.js'
 
@@ -43,6 +46,7 @@ import SettingsModal from './SettingsModal.vue'     // 设置弹窗子组件
 import SkillManager from './SkillManager.vue'       // 技能管理视图（主区三态之一，卡片网格 + 详情弹窗）
 import AgentManager from './AgentManager.vue'       // 智能体管理视图（主区三态之一，卡片网格 + 详情弹窗）
 import ApiDocManager from './ApiDocManager.vue'     // 接口文档视图（主区第四态：两个 tab + 三栏浏览 + 导入向导）
+import ApiIssueList from './ApiIssueList.vue'       // E-*/W-* 结构化校验清单（导入向导在用，附件结果卡直接复用，不重写）
 
 // ---------------- 响应式状态（≈ 组件的成员变量）----------------
 const message = useMessage()          // 顶部轻提示器
@@ -352,6 +356,303 @@ async function rejectApiDoc() {
   }
 }
 
+// ---------------- 附件导入（任务 10-20：DeepSeek 式入口，附件 = 操作而不是上下文）----------------
+// 四条红线（PRD D1/D8/D9 + R8）：
+//   ① 文件正文只作为**参数**传给 Go 方法（PreviewApiDocImport / CommitApiDocImport），
+//      不进 prompt、不走 LLM 回合 ⇒ 10-18 的 D5.1「保真」红线一条不破；
+//   ② 只吃 .md / .markdown、只吃 ≤2 MB、只吃文本；不合格本地就中文拒绝，不猜、不发请求；
+//   ③ 文件名只做文本插值（{{ }} 自动 HTML 转义），不进 v-html、不拼路径、不落盘；
+//   ④ 修正稿下载走 Blob（D7：绝不写回用户磁盘上的原文件），不通就降级为弹窗 + 复制。
+// 后端四道闸门一条都不绕（D5）：autoFix=true = 确定性修复 → 重新完整校验 → 仍有 E-* 照样拒收；
+// 附件条「基线导入」勾选位 = req.initMode = §13.26 的解析档位权威位（不勾而文档自声明
+// scope: init 被拒；勾了而文档声明 incremental/full 同样被拒）；allowInitOnNonEmpty 恒 false，
+// §13.12「init 只允许空项目」的闸门语义一字未动（D6 只放宽「不再在入口硬拒聊天附件」）。
+
+const MAX_ATTACH_BYTES = 2 * 1024 * 1024   // 2 MB 上限（D9）：超了不读、不发请求
+const MD_EXT_RE = /\.(md|markdown)$/i      // 只认扩展名，不看 MIME（拖拽进来的 file.type 常是空串）
+
+// 修复类型 → 中文（词表封闭，与 internal/apidoc/repair.go 的四个 Fix* 常量一一对应；
+// 白名单外的 kind 出现说明后端被人加了新修复类别，兜底原样显示而不是丢行）
+const FIX_KIND_TEXT = {
+  'bullet-form': '标点形态归一',
+  'fence-close': '围栏补闭合',
+  'pos-column': '补「位置」列（推断）',
+  'cross-ref-expand': '交叉引用展开（原样搬运）'
+}
+
+const attach = ref(null)           // 待发送附件 {name, size, text, initMode}；null = 无。纯组件视图态，不落库
+const attachReading = ref(false)   // FileReader 读取中（独立 loading，与回合 sending 各自一根）
+const attachInput = ref(null)      // 隐藏 input[type=file]
+const dragOver = ref(false)        // 拖拽悬停输入区（描边提示）
+const apiImport = ref(null)        // 附件导入结果卡（视图态；卡片对象本身是 reactive，见 sendWithAttachment）
+const fixedModalShow = ref(false)  // 修正稿降级弹窗（下载与剪贴板都不通时）
+const fixedModalText = ref('')
+
+function formatSize(bytes) {
+  const n = Number(bytes) || 0
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(2)} MB`
+}
+
+/** 附件通道的导入请求：与界面向导同一个 DTO（同一结构 = 同一条通道，D5）。
+ *  projectName 留空 = 跟随文档 meta.project：拿文件名猜项目名会造出错误的桶，
+ *  真没 meta 的散文文档由后端报「无法确定项目名」并指路（不猜，AC4）。
+ *  docRef 只作溯源文本（与向导同款：未手填来源时用文件名兜底），不参与任何路径拼接。 */
+function attachRequestOf(src, confirmed) {
+  return {
+    docText: src?.text || '',
+    docRef: src?.name || '',
+    projectName: '',
+    initMode: !!src?.initMode,     // 附件条「基线导入」勾选 = 解析档位权威位（§13.26）
+    allowInitOnNonEmpty: false,    // §13.12 闸门恒不放宽（聊天附件通道没有这个放行键）
+    autoFix: true,                 // 确定性修复 + 重新完整校验（D2/D4）
+    confirmed: !!confirmed,
+    title: '', reason: '', label: '', kind: '',
+    domainOverrides: []
+  }
+}
+
+function pickAttach() {
+  if (sending.value || attachReading.value) return // 回合进行中 / 正在读文件：不叠操作
+  attachInput.value?.click()
+}
+
+function onAttachFilePicked(e) {
+  const file = e.target.files?.[0]
+  e.target.value = '' // 必须清空：否则重选同一个文件不再触发 change（DeployFlowConfig 同款坑）
+  if (file) addAttachment(file)
+}
+
+/** 校验全在本地做完才谈读取：非 md / 空 / 超限一律中文拒绝，不发任何请求（D9/AC4）。
+ *  新附件直接替换旧附件（一次只挂一个，批量多文件是 Out of Scope）。 */
+function addAttachment(file) {
+  const name = file.name || '未命名文件'
+  if (!MD_EXT_RE.test(name)) {
+    message.error(`只接受接口文档 Markdown（.md / .markdown）：「${name}」已拒绝`)
+    return
+  }
+  if (!file.size) {
+    message.error(`「${name}」是空文件，没有可导入的内容`)
+    return
+  }
+  if (file.size > MAX_ATTACH_BYTES) {
+    message.error(`「${name}」${formatSize(file.size)}，超过 ${formatSize(MAX_ATTACH_BYTES)} 上限，已拒绝`)
+    return
+  }
+  attachReading.value = true
+  const reader = new FileReader()
+  reader.onload = () => {
+    attachReading.value = false
+    const text = String(reader.result ?? '')
+    // 非文本判定：NUL 是文本文件不会出现的字节（不猜内容，只拒绝）
+    if (text.includes('\u0000')) {
+      message.error(`「${name}」不是文本文件，附件只接受 Markdown 文本`)
+      return
+    }
+    if (!text.trim()) {
+      message.error(`「${name}」读出来只有空白字符，没有可导入的内容`)
+      return
+    }
+    attach.value = {name, size: file.size, text, initMode: false}
+    message.success(`已附加「${name}」：点发送即「体检 → 机械修复 → 导入」，正文不会发给模型`)
+  }
+  reader.onerror = () => {
+    attachReading.value = false
+    message.error('读取文件失败：当前环境不允许访问该文件')
+  }
+  reader.readAsText(file, 'utf-8')
+}
+
+function removeAttachment() {
+  attach.value = null
+}
+
+/** 收起结果卡（纯视图态清理：不改后端任何东西，导入已落库的结果与卡片无关）。
+ *  调用方按钮在 previewing/committing 期间被禁用，所以这里不需要再防"半途丢卡"。 */
+function dismissAttachCard() {
+  apiImport.value = null
+}
+
+// ---- 拖拽入口（与回形针等效，AC8）----
+function onZoneDragOver(e) {
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+  dragOver.value = true
+}
+function onZoneDragLeave(e) {
+  // 区内元素之间移动也会派发 dragleave：relatedTarget 还在区内就不熄灭高亮
+  const zone = e.currentTarget
+  if (zone && e.relatedTarget && zone.contains(e.relatedTarget)) return
+  dragOver.value = false
+}
+function onZoneDrop(e) {
+  e.preventDefault()
+  dragOver.value = false
+  const files = e.dataTransfer?.files
+  if (!files || files.length === 0) return // 拖的是选中文字/链接而不是文件：不动
+  if (files.length > 1) {
+    message.error(`一次只能附加一个接口文档（拖入了 ${files.length} 个），已整体拒绝`)
+    return
+  }
+  addAttachment(files[0])
+}
+
+/** D8：带附件的「发送」= 触发体检+修复+导入，不注入 prompt、不走 LLM 回合。
+ *  输入框里若还有文字，保留不清空（附件优先，绝不静默吞掉用户刚打的字）。
+ *  卡片用 reactive()：异步回调逐字段写回状态必须走代理，raw 对象塞 ref 改了不重渲染。 */
+async function sendWithAttachment() {
+  const file = attach.value
+  if (!file || sending.value || attachReading.value) return
+  if (!currentSession.value) await createSession()
+  attach.value = null // 附件即操作：发出即消费（AC8：移除或发送后回到普通聊天）
+  const card = reactive({
+    fileName: file.name,
+    fileSize: file.size,
+    initMode: !!file.initMode,
+    src: file,           // FileReader 读到的那份字节原样留着，提交时再传一次同一份（不重新加工）
+    preview: null,
+    result: null,
+    error: '',
+    fixedText: '',       // = 后端 fixedText（修复稿全文；未修出东西时 = 原文）
+    confirmed: false,    // 破坏性/删除的卡片内二次确认勾选（等价向导那一条，不是新审批机制）
+    previewing: true,
+    committing: false,
+    phase: 'previewing'  // previewing → ready → done / failed
+  })
+  apiImport.value = card
+  await nextTick()
+  scrollToBottom()
+  try {
+    const pv = await PreviewApiDocImport(attachRequestOf(file, false))
+    card.preview = pv || null
+    card.fixedText = pv?.fixedText || ''
+    card.phase = pv ? 'ready' : 'failed'
+    if (!pv) card.error = '后端没有返回预览结果'
+  } catch (err) {
+    card.error = String(err) // 后端中文短句原样展示（档位冲突 / 空文本等都在这一路）
+    card.phase = 'failed'
+  }
+  card.previewing = false
+  await nextTick()
+  scrollToBottom()
+}
+
+/** 确认导入：零 E-* 才可能走到这里；needConfirm 必须先勾卡片内的确认勾选（D16 同款）。
+ *  提交入参与预览同源（同一份 docText + 同一组勾选位），后端再跑一次同一个 Repair，
+ *  确定性保证「预览看到的 = 库里落下的」（AC6/AC7）。 */
+async function commitAttachmentImport() {
+  const card = apiImport.value
+  if (!card || card.previewing || card.committing || card.result) return
+  if (!canCommitAttach.value) {
+    if (attachBlockReason.value) message.warning(attachBlockReason.value)
+    return
+  }
+  card.committing = true
+  try {
+    const res = await CommitApiDocImport(attachRequestOf(card.src, true))
+    card.result = res || null
+    if (res?.fixedText) card.fixedText = res.fixedText
+    card.phase = res ? 'done' : 'failed'
+    if (!res) card.error = '后端没有返回导入结果'
+    else message.success(res.message || '导入完成')
+  } catch (err) {
+    // 服务层闸门拒收（剩余 E-* / 非空项目 init / 未确认 / 档位冲突）：一行都没写
+    card.error = String(err)
+    card.phase = 'failed'
+    message.error(String(err))
+  } finally {
+    card.committing = false
+    await nextTick()
+    scrollToBottom()
+  }
+}
+
+// ---- 结果卡的派生状态（只读当前卡片）----
+const attachCard = computed(() => apiImport.value)
+const attachPreview = computed(() => apiImport.value?.preview || null)
+const attachIssues = computed(() => attachPreview.value?.issues || [])
+const attachErrors = computed(() => attachIssues.value.filter(i => (i.level || '') === 'E'))
+const attachWarnings = computed(() => attachIssues.value.filter(i => (i.level || '') === 'W'))
+const attachFixes = computed(() => attachPreview.value?.fixes || [])
+const attachReviewCount = computed(() => attachFixes.value.filter(f => f.needsReview).length)
+const attachNotes = computed(() => attachPreview.value?.notes || [])
+const attachResultNotes = computed(() => apiImport.value?.result?.notes || [])
+const attachHasFix = computed(() => attachFixes.value.length > 0 && !!apiImport.value?.fixedText)
+
+/** 提交闸（前端只是把后端已有的闸显式化，后端同样会拒——不是"前端不显示按钮"那种假闸） */
+const canCommitAttach = computed(() => {
+  const c = apiImport.value
+  const p = c?.preview
+  if (!c || c.previewing || c.committing || c.result) return false
+  if (!p || !p.ok) return false
+  if (p.needConfirm && !c.confirmed) return false
+  return true
+})
+
+/** 按钮灰掉时必须说清为什么灰（绝不只变灰不解释） */
+const attachBlockReason = computed(() => {
+  const c = apiImport.value
+  const p = c?.preview
+  if (!c) return ''
+  if (c.error) return '后端已拒收，原因见上面的中文提示；一行都没写入。'
+  if (!p) return '还没拿到预览结果。'
+  if (attachErrors.value.length) return `仍有 ${attachErrors.value.length} 个 E-* 阻断问题：未导入，请修正文档后重新发送。`
+  if (p.initBlocked) return '基线导入被后端闸门拦住：init 只允许空项目。请先清项目，或去「接口文档」视图的导入向导执行。'
+  if (!p.ok) return attachNotes.value.length ? '已被后端闸门拦下，原因见上方中文提示。' : '当前预览结果不允许提交。'
+  if (p.needConfirm && !c.confirmed) return '本次导入含接口删除或破坏性变更，勾选确认后才能写入。'
+  return ''
+})
+
+const attachCommitLabel = computed(() =>
+  attachPreview.value?.needConfirm ? '我已核对，确认写入（删除/破坏性）' : '确认导入')
+
+/** 修正稿另存为 *.fixed.md：绝不与原名相同（D7 不写回原文件，静默改用户磁盘不可回退）。
+ *  文件名来自用户选的本地文件，这里只做字符串拼接给 Blob 下载属性用，不落任何真实路径。 */
+function fixedNameOf(fileName) {
+  const base = String(fileName || 'api-doc').replace(/\.(md|markdown)$/i, '')
+  return `${base || 'api-doc'}.fixed.md`
+}
+
+/** Blob 下载（桌面 WebView2 与浏览器都支持）：失败降级为弹窗 + 复制（D7/AC6） */
+function downloadFixedText() {
+  const card = apiImport.value
+  const text = card?.fixedText || ''
+  if (!text) return
+  try {
+    const blob = new Blob([text], {type: 'text/markdown;charset=utf-8'})
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = fixedNameOf(card.fileName)
+    a.rel = 'noopener'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    // 立刻 revoke 会让部分浏览器/WebView 取消还没起步的下载，延后一拍再回收
+    setTimeout(() => URL.revokeObjectURL(url), 2000)
+    message.success(`修正稿已导出为 ${fixedNameOf(card.fileName)}（原文件未被改写）`)
+  } catch {
+    fixedModalText.value = text
+    fixedModalShow.value = true
+    message.warning('当前环境不允许下载，已弹出修正稿全文供复制')
+  }
+}
+
+/** 复制修正稿：走与代码块「复制」同一个 copyText（navigator.clipboard → execCommand 双路） */
+async function copyFixedText() {
+  const card = apiImport.value
+  const text = card?.fixedText || ''
+  if (!text) return
+  if (await copyText(text)) {
+    message.success(`修正稿已复制到剪贴板（${text.length} 字符）`)
+  } else {
+    fixedModalText.value = text
+    fixedModalShow.value = true
+    message.warning('剪贴板不可用，已弹出修正稿全文供手动复制')
+  }
+}
+
 // ---------------- 数据加载 ----------------
 
 /** 拉取会话列表；selectFirst=true 且当前无选中时自动打开第一个会话 */
@@ -525,6 +826,13 @@ async function selectSession(sess) {
   // 代码块折叠态同理是会话内视图态（R3b）：整个 Set 换新对象（Vue 对 Set 的
   // clear/add/delete 都能触发依赖，但换对象最直白，也顺带丢弃上一个会话的死 key）
   expandedBlocks.value = new Set()
+  // 附件与它的结果卡也是组件内视图态（R7/D9）：切会话即丢弃，不落库、不跨会话串台
+  attach.value = null
+  attachReading.value = false
+  apiImport.value = null
+  dragOver.value = false
+  fixedModalShow.value = false
+  fixedModalText.value = ''
   deployRunning.value = false
   messages.value = ((await GetMessages(sess.id)) || []).map(normalize)
   await nextTick()             // 等消息渲染进 DOM
@@ -638,8 +946,14 @@ function scrollToBottom() {
 // 也不能覆盖新回合的 sending 锁，所以清理前先核对代号。
 let turnSeq = 0
 
-/** 发送：乐观上屏 → 调 Go → 流式增量经事件回来 → done 事件收尾 */
+/** 发送：乐观上屏 → 调 Go → 流式增量经事件回来 → done 事件收尾。
+ *  带附件时走另一条路（D8）：不拼 prompt、不调 SendMessage、不起 LLM 回合，
+ *  直接触发「体检 + 确定性修复 + 导入」并渲染结果卡。 */
 async function send() {
+  if (attach.value) {
+    await sendWithAttachment()
+    return
+  }
   const text = input.value.trim()
   if (!text || sending.value) return   // 空消息或上一回合未结束：直接忽略
   if (!currentSession.value) {
@@ -1027,43 +1341,204 @@ watch(view, (v, oldV) => {
         </div>
       </div>
 
-      <!-- 底部：输入区（position:relative，作为建议浮层的定位上下文）。
-           @keydown.enter.exact="onEnterOrSend" 解读：
-           .exact = 不带 Shift 等修饰键才触发（Shift+Enter 照常换行）；
-           preventDefault 在 onEnterOrSend 内手动调用——输入法组合态（isComposing）
-           时直接放行不阻止默认行为，候选回车才能正常上屏（详见函数注释）。
-           浮层打开时 Enter 是"选中建议"而非发送（在 onEnterOrSend 内分流）。
-           v-model:value = 双向绑定：输入框内容 ↔ input 变量（≈ 自动的 getText/setText） -->
-      <div class="chat-input">
-        <!-- 建议浮层：输入首字符为 / 或 @ 时弹出在输入框上方（不遮挡发送按钮）。
-             mousedown.prevent = 点击选中不让文本框失焦；↑↓ 导航、Enter/Tab 选中、Esc 关闭 -->
-        <div v-if="suggVisible" class="sugg-pop">
-          <div
-            v-for="(it, i) in suggItems" :key="it.id || it.name"
-            class="sugg-item" :class="{active: i === suggIndex}"
-            @mouseenter="suggIndex = i"
-            @mousedown.prevent="selectSuggestion(it)"
-          >
-            <span class="sugg-name">{{ (suggTrigger.kind === 'skill' ? '/' : '@') + it.name }}</span>
-            <span v-if="it.description" class="sugg-desc">{{ it.description }}</span>
-          </div>
-          <div v-if="suggItems.length === 0" class="sugg-empty">{{ suggEmptyText }}</div>
-          <div class="sugg-hint">↑↓ 选择 · Enter/Tab 确认 · Esc 关闭</div>
+      <!-- 附件导入结果卡（任务 10-20，R4/AC1/AC2/AC6）：
+           体检汇总 → 已自动修复清单（行号 + 改了什么 + 待核对）→ 剩余 E-*/W-*（复用
+           ApiIssueList）→ 确认导入（needConfirm 需勾二次确认）→ 导入结果 → 下载修正稿。
+           沿用上面两张审批卡片的 .deploy-* 样式族（同一视觉语言，零新增 CSS 变量）；
+           文件名 / before / after / note 一律文本插值，**零新增 v-html**。
+           后端闸门不被前端代替：按钮只把「已存在的闸」显示出来，硬拦在服务层。 -->
+      <div v-if="attachCard" class="deploy-card">
+        <div class="deploy-head">
+          <n-tag type="info" size="small">接口文档附件导入</n-tag>
+          <strong class="deploy-title">{{ attachCard.fileName }}</strong>
+          <span class="deploy-meta">
+            {{ formatSize(attachCard.fileSize) }} ·
+            {{ attachCard.initMode ? '基线导入（已勾选）' : '增量导入' }} ·
+            解析档位 {{ attachPreview?.mode || '—' }}
+          </span>
+          <n-tag v-if="attachCard.previewing" size="small" type="info">体检中…</n-tag>
+          <n-tag v-else-if="attachCard.result" size="small" type="success">已导入</n-tag>
+          <n-tag v-else-if="attachCard.error" size="small" type="error">未导入</n-tag>
+          <n-tag v-else-if="attachPreview && !attachPreview.ok" size="small" type="error">未导入</n-tag>
+          <n-tag v-else-if="attachPreview?.needConfirm" size="small" type="warning">需二次确认</n-tag>
+          <!-- 收卡：只在没有异步动作在飞时可点（提交中关掉卡片会让"写了什么"失去着落） -->
+          <n-button
+            size="tiny" quaternary class="attach-close" title="关闭这张卡片"
+            :disabled="attachCard.previewing || attachCard.committing"
+            @click="dismissAttachCard"
+          >✕</n-button>
         </div>
-        <n-input
-          ref="inputRef"
-          v-model:value="input"
-          type="textarea"
-          :autosize="{minRows: 1, maxRows: 5}"
-          placeholder="输入消息，Enter 发送，Shift+Enter 换行；/ 触发技能，@运维 强制路由"
-          :disabled="sending"
-          @keydown="onSuggKeydown"
-          @keydown.enter.exact="onEnterOrSend"
-        />
-        <!-- 停止按钮：回合流式期间或部署执行期间出现。点击后本地立即收起气泡，
-             后端以"已停止"收尾（回合走 chat:done，部署走 deploy:done canceled） -->
-        <n-button v-if="sending || deployRunning" type="warning" secondary @click="stopTurn">停止</n-button>
-        <n-button type="primary" :loading="sending" :disabled="!input.trim()" @click="send">发送</n-button>
+
+        <!-- 后端中文错误原样展示（档位冲突 / 空文本 / 闸门拒收都走这一路，不加工不猜测） -->
+        <div v-if="attachCard.error" class="attach-error">后端拒绝：{{ attachCard.error }}</div>
+
+        <div v-if="attachPreview" class="deploy-desc">
+          {{ attachPreview.message }}
+          <template v-if="attachFixes.length"> · 已自动修复 {{ attachFixes.length }} 处</template>
+          <template v-if="attachErrors.length"> · 剩余 {{ attachErrors.length }} 个 E-* 需人工处理</template>
+          <template v-else-if="attachWarnings.length"> · 剩余 {{ attachWarnings.length }} 个 W-* 建议核对</template>
+        </div>
+
+        <!-- 修复清单（D4：改了哪几处、每处行号与理由必须可见，不能静默改完就导） -->
+        <div v-if="attachFixes.length" class="fix-zone">
+          <div class="zone-title">
+            已自动修复 {{ attachFixes.length }} 处<template v-if="attachReviewCount">（其中 {{ attachReviewCount }} 处为推断，待人工核对）</template>
+          </div>
+          <div class="deploy-cmds">
+            <div v-for="(f, i) in attachFixes" :key="i" class="fix-row">
+              <div class="fix-head">
+                <span class="fix-kind">{{ FIX_KIND_TEXT[f.kind] || f.kind }}</span>
+                <span class="fix-line">第 {{ f.line }} 行</span>
+                <n-tag v-if="f.needsReview" size="tiny" type="warning">待人工核对</n-tag>
+              </div>
+              <div class="fix-diff">
+                <div class="fix-before">− {{ f.before }}</div>
+                <div class="fix-after">+ {{ f.after }}</div>
+              </div>
+              <div v-if="f.note" class="fix-note">{{ f.note }}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 剩余问题：E-* 红（阻断）/ W-* 黄（不阻断但要核对），带行号 —— 现成组件，不重写 -->
+        <ApiIssueList v-if="attachErrors.length" :issues="attachIssues" level="E"/>
+        <ApiIssueList v-if="attachWarnings.length" :issues="attachIssues" level="W"/>
+
+        <div v-if="attachNotes.length" class="note-zone">
+          <div v-for="(n, i) in attachNotes" :key="i">· {{ n }}</div>
+        </div>
+
+        <!-- 导入结果（R4：事件 seq / stats / 是否生成事件 / 修复处数） -->
+        <div v-if="attachCard.result" class="result-zone">
+          <div class="zone-title">导入结果</div>
+          <div class="deploy-params">
+            <span class="deploy-param">
+              事件 {{ attachCard.result.eventId ? 'v' + attachCard.result.seq : '未生成（基线导入或无变更）' }}
+            </span>
+            <span class="deploy-param">新增 {{ attachCard.result.stats?.added || 0 }}</span>
+            <span class="deploy-param">修改 {{ attachCard.result.stats?.updated || 0 }}</span>
+            <span class="deploy-param">删除 {{ attachCard.result.stats?.removed || 0 }}</span>
+            <span class="deploy-param">恢复 {{ attachCard.result.stats?.restored || 0 }}</span>
+            <span class="deploy-param">未变更 {{ attachCard.result.stats?.unchanged || 0 }}</span>
+            <span class="deploy-param">已修复 {{ attachCard.result.fixCount || 0 }} 处</span>
+          </div>
+          <div v-if="attachCard.result.createdProject || attachCard.result.createdDomains?.length" class="deploy-desc">
+            <template v-if="attachCard.result.createdProject">本次新建项目「{{ attachPreview?.projectName }}」；</template>
+            <template v-if="attachCard.result.createdDomains?.length">新建领域：{{ attachCard.result.createdDomains.join('、') }}</template>
+          </div>
+          <div v-if="attachResultNotes.length" class="note-zone">
+            <div v-for="(n, i) in attachResultNotes" :key="i">· {{ n }}</div>
+          </div>
+          <div class="deploy-desc">{{ attachCard.result.message }}</div>
+        </div>
+
+        <div class="deploy-actions">
+          <span class="deploy-hint">{{ attachBlockReason || (attachCard.result ? '本次导入已完成，可下载修正稿存档' : '确认后写入并生成变更事件') }}</span>
+          <n-checkbox
+            v-if="attachPreview?.needConfirm && !attachCard.result"
+            v-model:checked="attachCard.confirmed"
+            :disabled="attachCard.committing || attachCard.previewing"
+          >我已核对删除/破坏性变更</n-checkbox>
+          <!-- 下载/复制的是后端算好的修复稿全文（fixedText），不是前端再修一遍（D7/AC6） -->
+          <n-button v-if="attachHasFix" size="small" @click="downloadFixedText">下载修正后的 md</n-button>
+          <n-button v-if="attachHasFix" size="small" quaternary @click="copyFixedText">复制修正稿</n-button>
+          <n-button
+            v-if="!attachCard.result"
+            size="small" type="primary"
+            :disabled="!canCommitAttach"
+            :loading="attachCard.committing || attachCard.previewing"
+            @click="commitAttachmentImport"
+          >{{ attachCommitLabel }}</n-button>
+        </div>
+      </div>
+
+      <!-- 输入区外包一层 .input-zone：附件条钉在输入框上方 + 整块区域是拖拽落点（R1）。
+           分隔线从 .chat-input 挪到本层，否则附件条会跑到分隔线之上、与输入框割裂。 -->
+      <div
+        class="input-zone"
+        :class="{'drag-over': dragOver}"
+        @dragenter.prevent="onZoneDragOver"
+        @dragover.prevent="onZoneDragOver"
+        @dragleave="onZoneDragLeave"
+        @drop.prevent="onZoneDrop"
+      >
+        <!-- 附件条（R1）：文件名 / 大小 / 「基线导入」勾选 / 移除。
+             名字只用 {{ }} 文本插值（Vue 自动 HTML 转义）：不进 v-html、不拼路径、不落盘（D9）。
+             勾选位 = req.initMode = §13.26 的解析档位权威位：不勾而文档自声明 scope: init
+             被后端拒收；勾了而文档声明 incremental/full 同样被拒（对称面）。 -->
+        <div v-if="attach" class="attach-bar">
+          <span class="attach-file">📄 {{ attach.name }}</span>
+          <span class="attach-size">{{ formatSize(attach.size) }}</span>
+          <n-checkbox v-model:checked="attach.initMode" size="small">基线导入</n-checkbox>
+          <span class="attach-tip">
+            {{ attach.initMode
+              ? '按 scope: init 灌入存量基线（仅空项目允许，不生成变更事件）'
+              : '发送即「体检 → 机械修复 → 导入」，正文不发给模型、不占上下文' }}
+          </span>
+          <n-button size="tiny" quaternary :disabled="attachReading" @click="removeAttachment">移除</n-button>
+        </div>
+
+        <!-- 底部：输入区（position:relative，作为建议浮层的定位上下文）。
+             @keydown.enter.exact="onEnterOrSend" 解读：
+             .exact = 不带 Shift 等修饰键才触发（Shift+Enter 照常换行）；
+             preventDefault 在 onEnterOrSend 内手动调用——输入法组合态（isComposing）
+             时直接放行不阻止默认行为，候选回车才能正常上屏（详见函数注释）。
+             浮层打开时 Enter 是"选中建议"而非发送（在 onEnterOrSend 内分流）。
+             v-model:value = 双向绑定：输入框内容 ↔ input 变量（≈ 自动的 getText/setText） -->
+        <div class="chat-input">
+          <!-- 建议浮层：输入首字符为 / 或 @ 时弹出在输入框上方（不遮挡发送按钮）。
+               mousedown.prevent = 点击选中不让文本框失焦；↑↓ 导航、Enter/Tab 选中、Esc 关闭 -->
+          <div v-if="suggVisible" class="sugg-pop">
+            <div
+              v-for="(it, i) in suggItems" :key="it.id || it.name"
+              class="sugg-item" :class="{active: i === suggIndex}"
+              @mouseenter="suggIndex = i"
+              @mousedown.prevent="selectSuggestion(it)"
+            >
+              <span class="sugg-name">{{ (suggTrigger.kind === 'skill' ? '/' : '@') + it.name }}</span>
+              <span v-if="it.description" class="sugg-desc">{{ it.description }}</span>
+            </div>
+            <div v-if="suggItems.length === 0" class="sugg-empty">{{ suggEmptyText }}</div>
+            <div class="sugg-hint">↑↓ 选择 · Enter/Tab 确认 · Esc 关闭</div>
+          </div>
+          <!-- 附件入口①：回形针（入口②是整块输入区的拖拽，两条等效，AC8）。
+               accept 限定扩展名与 MIME；隐藏 input 由按钮 programmatic click 触发 -->
+          <n-button
+            size="small" quaternary class="attach-btn"
+            title="附加接口文档 Markdown（.md / .markdown，≤2 MB）"
+            :loading="attachReading"
+            :disabled="sending"
+            @click="pickAttach"
+          >📎</n-button>
+          <input
+            ref="attachInput"
+            type="file"
+            accept=".md,.markdown,text/markdown"
+            class="hidden-file"
+            @change="onAttachFilePicked"
+          />
+          <n-input
+            ref="inputRef"
+            v-model:value="input"
+            type="textarea"
+            :autosize="{minRows: 1, maxRows: 5}"
+            placeholder="输入消息，Enter 发送，Shift+Enter 换行；/ 触发技能，@运维 强制路由；📎 或拖入 .md = 直接导入接口文档"
+            :disabled="sending"
+            @keydown="onSuggKeydown"
+            @keydown.enter.exact="onEnterOrSend"
+          />
+          <!-- 停止按钮：回合流式期间或部署执行期间出现。点击后本地立即收起气泡，
+               后端以"已停止"收尾（回合走 chat:done，部署走 deploy:done canceled） -->
+          <n-button v-if="sending || deployRunning" type="warning" secondary @click="stopTurn">停止</n-button>
+          <!-- 带附件时输入文字不是必要条件（D8：附件本身就是要执行的操作）；
+               读文件期间禁发，防"附件还没读完就点发送" -->
+          <n-button
+            type="primary"
+            :loading="sending"
+            :disabled="(!input.trim() && !attach) || attachReading"
+            @click="send"
+          >发送</n-button>
+        </div>
       </div>
 
       </div><!-- /.chat-view -->
@@ -1079,6 +1554,30 @@ watch(view, (v, oldV) => {
       <ApiDocManager v-if="view === 'apidocs'"/>
     </n-layout>
   </n-layout>
+
+  <!-- 修正稿降级弹窗（D7/AC6）：Blob 下载被浏览器策略拦掉、或剪贴板两条路都不通时，
+       把全文摆出来供手动复制。n-code 的 code 是纯字符串属性，不经 markdown/v-html 管道
+       ⇒ 外部文档内容零注入面（与 ApiDocManager「导出规范」降级弹窗同一手法）。 -->
+  <n-modal
+    v-if="fixedModalShow"
+    :show="true"
+    preset="card"
+    title="修正后的接口文档（可全选复制）"
+    style="width: 760px"
+    :segmented="{content: true}"
+    @update:show="fixedModalShow = false"
+  >
+    <div class="fixed-modal-body">
+      <div class="fixed-modal-tip">
+        当前环境不允许直接下载。原文如下（已由后端确定性修复，原文件未被改写），请全选复制后存为 .md。
+      </div>
+      <n-code :code="fixedModalText" language="markdown" word-wrap/>
+      <div class="fixed-modal-acts">
+        <n-button size="small" @click="copyFixedText">再次尝试复制</n-button>
+        <n-button size="small" type="primary" ghost @click="fixedModalShow = false">关闭</n-button>
+      </div>
+    </div>
+  </n-modal>
 
   <!-- 设置弹窗。v-model:show 双向绑定显隐状态：
        弹窗内部关闭时会把 show 写回 false（父子组件通信的简洁写法） -->
@@ -1286,10 +1785,37 @@ watch(view, (v, oldV) => {
 .msg-body :deep(pre)::-webkit-scrollbar-track,
 .msg-body :deep(table)::-webkit-scrollbar-track { background: transparent; }
 .msg-tools { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+/* 输入区外包裹层：附件条 + 输入行的共同容器，也是拖拽落点。
+   分隔线从 .chat-input 挪到这里 —— 附件条必须落在分隔线**下方**（与输入框同区），
+   否则视觉上会变成"附件属于消息流"。 */
+.input-zone { border-top: 1px solid rgba(255,255,255,0.08); }
+/* 拖拽悬停：主色虚线内描边（outline-offset 负值 → 不撑高布局、不产生横向溢出，R5） */
+.input-zone.drag-over {
+  outline: 1px dashed rgba(99,226,183,0.65);
+  outline-offset: -3px;
+  background: rgba(99,226,183,0.05);
+}
+/* 附件条（R1）：文件名 + 大小 + 基线导入勾选 + 移除，钉在输入框上方 */
+.attach-bar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  padding: 8px 24px 0; font-size: 12px;
+}
+/* 文件名可长（Downloads/api-doc-2026-…md）：max-width + 省略号，min-width:0 是
+   flex 子项截断生效的关键（与会话标题同一手法），绝不撑出横向滚动条 */
+.attach-file {
+  max-width: 320px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: Consolas, monospace; color: rgba(99,226,183,0.85);
+}
+.attach-size { color: rgba(255,255,255,0.45); font-family: Consolas, monospace; }
+.attach-tip { color: rgba(255,255,255,0.4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-btn { flex: 0 0 auto; }
+/* 收卡按钮钉在卡片头行右缘（margin-left:auto 吃掉剩余宽度，长文件名换行也不影响它） */
+.attach-close { margin-left: auto; }
+/* 隐藏的原生 file input：不用 display:none 在 n-button 之外占据可见空间 */
+.hidden-file { display: none; }
 .chat-input {
   position: relative; /* 建议浮层的定位上下文（浮层钉在输入区上方） */
   display: flex; gap: 10px; padding: 12px 24px; align-items: flex-end;
-  border-top: 1px solid rgba(255,255,255,0.08);
 }
 /* 建议浮层：深色面板贴合主题（背景取全局 #18181c 略提亮），高亮沿用
    会话列表的绿色选中色系；描述单行省略（部署技能的动态描述可能很长） */
@@ -1341,4 +1867,39 @@ watch(view, (v, oldV) => {
 }
 .deploy-actions { margin-top: 10px; display: flex; align-items: center; gap: 10px; justify-content: flex-end; }
 .deploy-hint { margin-right: auto; font-size: 12px; color: rgba(255,255,255,0.45); }
+/* ================= 附件导入结果卡（任务 10-20）=================
+   容器复用上面的 .deploy-card 族（三张卡片同一视觉语言，不另起样式族、不抽 token）。
+   配色沿用仓库既有三档：红 rgba(224,108,117) 阻断 / 琥珀 rgba(240,168,48) 待核对 /
+   主色 rgba(99,226,183) 信息，与 ApiIssueList.vue 里错误区、警告区两栏完全一致。 */
+.attach-error {
+  margin-top: 8px; padding: 8px 10px; border-radius: 6px; font-size: 12.5px; line-height: 1.7;
+  background: rgba(224,108,117,0.08); border: 1px solid rgba(224,108,117,0.35);
+  color: rgba(255,255,255,0.82); word-break: break-word; overflow-wrap: anywhere;
+}
+.fix-zone, .result-zone, .note-zone { margin-top: 8px; }
+.note-zone { font-size: 12px; color: rgba(255,255,255,0.6); line-height: 1.7; }
+.fix-zone > .zone-title, .result-zone > .zone-title {
+  font-size: 12px; font-weight: 600; color: rgba(99,226,183,0.85); margin-bottom: 4px;
+}
+/* 修复清单每条：类型 + 行号 + 待核对徽标一行，before/after 等宽两行，note 次行。
+   .deploy-cmds 已经给了 max-height:220 + overflow-y:auto（复用，不重定义滚动区） */
+.fix-row {
+  padding: 6px 0; border-top: 1px dashed rgba(255,255,255,0.12); line-height: 1.7; font-size: 12px;
+}
+.fix-row:first-of-type { border-top: none; }
+.fix-head { display: flex; align-items: center; gap: 10px; }
+.fix-kind { color: rgba(255,255,255,0.9); font-weight: 600; }
+.fix-line { color: rgba(255,255,255,0.5); font-family: Consolas, monospace; }
+.fix-diff {
+  margin-top: 2px; font-family: Consolas, Menlo, monospace; color: rgba(255,255,255,0.7);
+  /* 修复前后原文可能很长（搬运进来的整张表概述）：允许任意断行，绝不撑出横向滚动 */
+  word-break: break-word; overflow-wrap: anywhere; white-space: pre-wrap;
+}
+.fix-before { color: rgba(224,108,117,0.85); }
+.fix-after { color: rgba(99,226,183,0.85); }
+.fix-note { margin-top: 2px; color: rgba(255,255,255,0.6); }
+/* 修正稿降级弹窗 */
+.fixed-modal-body { display: flex; flex-direction: column; gap: 8px; max-height: 60vh; overflow-y: auto; }
+.fixed-modal-tip { font-size: 12px; color: rgba(255,255,255,0.55); }
+.fixed-modal-acts { display: flex; gap: 8px; justify-content: flex-end; }
 </style>

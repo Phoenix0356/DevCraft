@@ -51,7 +51,7 @@ const message = useMessage()
 const docText = ref('')          // 文档全文（选文件后也回填到这里，统一入口）
 const docRef = ref('')           // 来源路径（可空，仅溯源）
 const projectName = ref('')      // 覆盖 meta.project；'' = 用文档 meta 值
-const initMode = ref(false)      // 无 meta 的散文文档：按 init 解析（§13.18）
+const initMode = ref(false)      // 解析档位的唯一权威（§13.26）：无 meta 的散文文档靠它兜底；文档自声明 scope 与它冲突则整批被拒
 const allowInit = ref(false)     // 非空项目放行 init（§13.12 闸门键 = allowInitOnNonEmpty）
 const previewing = ref(false)
 const committing = ref(false)
@@ -474,7 +474,8 @@ const resultNotes = computed(() => result.value?.notes || [])
 
       <div class="check-row">
         <n-checkbox v-model:checked="initMode" @update:checked="doPreview(true)">
-          初始化模式（无 meta 的存量散文文档；推断点会逐条打警告）
+          初始化模式（解析档位的唯一权威，spec-draft §13.26：文档声明 scope: init 时必须勾，
+          声明 incremental/full 时勾了会被拒；无 meta 的存量散文文档靠它按 init 解析，推断点逐条打警告）
         </n-checkbox>
       </div>
 
