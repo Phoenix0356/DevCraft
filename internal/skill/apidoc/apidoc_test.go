@@ -87,11 +87,17 @@ func execSkill(t *testing.T, reg *skill.Registry, name string, args json.RawMess
 	return sk.Execute(context.Background(), args)
 }
 
-// registerFake 注册三个技能到独立注册表，返回注册表与假编排层。
+// registerFake 注册四个技能到独立注册表（三件套 + apidoc_query），
+// 返回注册表与假编排层；查询缝用空假实现（query 用例另有 registerFakeQuery）。
 func registerFake(t *testing.T, f *fakeDocs) *skill.Registry {
 	t.Helper()
+	return registerFakeQuery(t, f, newFakeQuery())
+}
+
+func registerFakeQuery(t *testing.T, f *fakeDocs, q QuerySource) *skill.Registry {
+	t.Helper()
 	reg := skill.NewRegistry()
-	if err := Register(reg, f); err != nil {
+	if err := Register(reg, f, q); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	return reg
@@ -103,12 +109,13 @@ func registerFake(t *testing.T, f *fakeDocs) *skill.Registry {
 // 匹配 function-calling 的工具名字符集（Registry 强制含 "_"，skill.go:56-58）。
 func TestSkillRegistration(t *testing.T) {
 	reg := registerFake(t, &fakeDocs{})
+	all := append(append([]string{}, SkillNames...), SkillQuery) // 交付三件套 + 只读查询
 	names := reg.Names()
-	if len(names) != len(SkillNames) {
-		t.Fatalf("注册技能数 = %d, want %d（%v）", len(names), len(SkillNames), names)
+	if len(names) != len(all) {
+		t.Fatalf("注册技能数 = %d, want %d（%v）", len(names), len(all), names)
 	}
 	toolNameRe := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
-	for _, n := range SkillNames {
+	for _, n := range all {
 		if !strings.HasPrefix(n, "apidoc_") {
 			t.Errorf("技能名 %q 必须以 apidoc_ 开头（命名空间约定）", n)
 		}
@@ -126,7 +133,7 @@ func TestSkillRegistration(t *testing.T) {
 		}
 	}
 	// 同名重复注册必须报错（防止静默覆盖成第二份实现）
-	if err := Register(reg, &fakeDocs{}); err == nil {
+	if err := Register(reg, &fakeDocs{}, newFakeQuery()); err == nil {
 		t.Fatal("重复注册同名技能应报错")
 	}
 }
@@ -135,7 +142,7 @@ func TestSkillRegistration(t *testing.T) {
 // Parameters 是合法 JSON Schema；check/import 的 schema 里绝不允许出现正文字段。
 func TestSkillDescriptionsAndSchemas(t *testing.T) {
 	reg := registerFake(t, &fakeDocs{})
-	for _, name := range SkillNames {
+	for _, name := range append(append([]string{}, SkillNames...), SkillQuery) {
 		sk, _ := reg.Get(name)
 		if strings.TrimSpace(sk.Description()) == "" {
 			t.Fatalf("%s Description 为空（模型无法路由）", name)

@@ -36,10 +36,11 @@ import (
 	"DevCraft/internal/store"
 )
 
-// attachApiDocSkills 把真技能装进测试服务的注册表（app.go buildService 的同款接线）。
+// attachApiDocSkills 把真技能装进测试服务的注册表（app.go buildService 的同款接线；
+// 第三个参数 svc 是 apidoc_query 的只读缝 QuerySource，任务 10-21）。
 func attachApiDocSkills(t *testing.T, svc *Service) {
 	t.Helper()
-	if err := skillapidoc.Register(svc.skills, svc); err != nil {
+	if err := skillapidoc.Register(svc.skills, svc, svc); err != nil {
 		t.Fatalf("注册接口文档技能: %v", err)
 	}
 }

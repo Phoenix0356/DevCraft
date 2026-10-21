@@ -156,10 +156,11 @@ func buildService(emit appsvc.Emit) (*appsvc.Service, error) {
 		return nil, err
 	}
 	// 9. 接口文档技能（三件套：apidoc_spec 交付规范 / apidoc_check 格式体检 /
-	// apidoc_import 触发导入）：本包注入的仍是 svc ——四个技能侧方法都在 appsvc 上
-	// （见 internal/appsvc/apidocskill.go），校验/导入与界面向导共用同一套 Go 方法（D8）。
+	// apidoc_import 触发导入）+ 只读查询技能 apidoc_query（任务 10-21）：
+	// 本包注入的仍是 svc ——技能侧方法都在 appsvc 上（写路径见 internal/appsvc/apidocskill.go，
+	// 只读投影见 internal/appsvc/apidocquery.go），校验/导入/查询与界面向导共用同一套 Go 方法（D8/D5）。
 	// 正文由技能自己读盘、init 与二次确认闸在服务层硬编码，技能包不 import appsvc。
-	if err := apidocskill.Register(skills, svc); err != nil {
+	if err := apidocskill.Register(skills, svc, svc); err != nil {
 		return nil, err
 	}
 	// 10. 一次性自动补装迁移：把 3 个 pg 技能并集进内置运维 Agent 的装配
@@ -172,6 +173,12 @@ func buildService(emit appsvc.Emit) (*appsvc.Service, error) {
 	// 不补装就会"注册了但会话里调不到"——新会话默认绑定运维 Agent。
 	if err := svc.MigrateApiDocSkills(); err != nil {
 		return nil, fmt.Errorf("migrate apidoc skills: %w", err)
+	}
+	// 12. 同款补装（任务 10-21）：把只读查询技能 apidoc_query 并集进内置运维 Agent。
+	// ⚠️ 必须用新标记键 seed.apidoc_query_v1：旧键 seed.apidoc_skills_v1 在存量安装里
+	// 已写死，复用它 = 升级后补装被跳过 = 注册了但会话里静默调不到（PRD D6）。
+	if err := svc.MigrateApiDocQuerySkill(); err != nil {
+		return nil, fmt.Errorf("migrate apidoc query skill: %w", err)
 	}
 	return svc, nil
 }

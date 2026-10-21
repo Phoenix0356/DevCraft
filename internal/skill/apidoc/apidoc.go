@@ -1,5 +1,6 @@
-// Package apidoc 实现接口文档域的 3 个内置技能：
-// apidoc_spec（交付规范全文）/ apidoc_check（格式体检）/ apidoc_import（触发导入）。
+// Package apidoc 实现接口文档域的 4 个内置技能：
+// apidoc_spec（交付规范全文）/ apidoc_check（格式体检）/ apidoc_import（触发导入）
+// 与 apidoc_query（只读查询接口文档库，任务 10-21，见 query.go）。
 //
 // 为什么拆成 3 个技能而不是 1 个多工具技能（对照仓库既有形状）：
 //   - pg 域就是「一个包三个技能」（pg_list_tables / pg_describe_table / pg_query，
@@ -50,9 +51,14 @@ const (
 	SkillSpec   = "apidoc_spec"
 	SkillCheck  = "apidoc_check"
 	SkillImport = "apidoc_import"
+	// SkillQuery 只读查询技能（任务 10-21，见 query.go）：接口文档库的目录/清单/
+	// 详情/变更史查询，唯一的读工具。装配迁移单独用新标记键 seed.apidoc_query_v1，
+	// 不并进 SkillNames——沿用旧键 seed.apidoc_skills_v1 会让存量安装跳过补装（D6）。
+	SkillQuery = "apidoc_query"
 )
 
-// SkillNames 全部 apidoc 技能名（用户手工装配 / 将来一次性补装迁移都用它）。
+// SkillNames 交付三件套的技能名（用户手工装配 / 一次性补装迁移 MigrateApiDocSkills 用它）。
+// ⚠️ 不含 SkillQuery：查询技能的补装走独立标记键（见上方常量注释），两批迁移互不影响。
 var SkillNames = []string{SkillSpec, SkillCheck, SkillImport}
 
 // 体量与路径防护（对照 pg 的 DefaultRowLimit/MaxOutputChars 三件套范式）。
@@ -144,14 +150,16 @@ type DocService interface {
 	ApiDocSkillSubmitApproval(ctx context.Context, in ImportInput) (string, ImportCheck, error)
 }
 
-// Register 把 3 个接口文档技能挂载到注册表（注册范式同 ops/deploy/pg）。
-// docs 由 app.go 注入（同一个 *appsvc.Service 同时实现四个方法）。
-func Register(reg *skill.Registry, docs DocService) error {
+// Register 把 4 个接口文档技能挂载到注册表（注册范式同 ops/deploy/pg）。
+// docs 由 app.go 注入（同一个 *appsvc.Service 同时实现四个技能侧方法，见 appsvc/apidocskill.go）；
+// query 是只读查询缝（任务 10-21，实现见 appsvc/apidocquery.go——六个既有查询方法的薄投影）。
+func Register(reg *skill.Registry, docs DocService, query QuerySource) error {
 	b := base{docs: docs}
 	for _, s := range []skill.Skill{
 		&specDoc{base: b},
 		&checkDoc{base: b},
 		&importDoc{base: b},
+		&queryDoc{base: b, q: query},
 	} {
 		if err := reg.Register(s); err != nil {
 			return err
@@ -160,7 +168,8 @@ func Register(reg *skill.Registry, docs DocService) error {
 	return nil
 }
 
-// base 三个技能共有的依赖与读文件/渲染逻辑（组合复用，对照 pg.base）。
+// base 交付三件套共有的依赖与读文件/渲染逻辑（组合复用，对照 pg.base；
+// queryDoc 也内嵌它复用 render——查询技能自身的只读缝在 query.go 的 QuerySource）。
 type base struct {
 	docs DocService
 }
