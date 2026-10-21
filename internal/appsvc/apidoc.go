@@ -12,6 +12,9 @@
 //     scope:init 只允许空项目或显式勾选（§13.12）；
 //   - 落库 api_schemas.owner_scope 必须是 entry id，解析层 SchemaDef.OwnerScope 是
 //     identity_key，两层语义不同、必须映射（§13.13）；
+//   - 命名结构歧义（同名不同构 → ambiguous）的 diff 项走降级通道：NeedsConfirm +
+//     rule=struct-ambiguous，不参与 E-BREAKING-DENIED / E-DIFF-MISMATCH-UNCHANGED 的
+//     「作者违约」裁决（10-21 D2）；无歧义的真实破坏照常整批拒收，闸门不许修哑；
 //   - 手工编辑（SaveApiEntry / SaveApiDomain）不产生变更事件（PRD 已裁决，事件链会有洞，已知并接受）；
 //     且走服务端读-改-写：store 的 upsert/UPDATE 都是全列写，补齐责任在服务端而不在调用方
 //     （§13.19「手工编辑不重算双 hash」由「前端自律」升级为「服务端保证」）；
@@ -31,6 +34,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -857,6 +861,7 @@ func (s *Service) planDeclaredEntry(rdr apiImportReader, plan *apiDocPlan, p *ap
 		p.changeType = store.ApiChangeTypeUpdated
 		p.diff = diff
 		p.breaking = apidoc.AggregateBreaking(diff)
+		noteStructAmbiguous(plan, key, diff)
 		if ep.BreakingDecl == 1 && p.breaking == apidoc.BreakingNo {
 			p.breaking = store.ApiBreakingYes
 		}
@@ -900,10 +905,14 @@ func (s *Service) planDeclaredEntry(rdr apiImportReader, plan *apiDocPlan, p *ap
 		if err != nil {
 			return err
 		}
-		if diff := apidoc.DiffEndpoints(before, ep); len(diff) > 0 {
+		diff := apidoc.DiffEndpoints(before, ep)
+		// ambiguous 命名结构的降级项不参与「作者违约」裁决（D2）：程序自己都认不出该用
+		// 哪套结构定义时，没资格说「声明未变更却存在字段级差异」。真实差异照旧拒收。
+		noteStructAmbiguous(plan, key, diff)
+		if real := apidoc.AuthoritativeItems(diff); len(real) > 0 {
 			// 声明集合与程序 diff 集合不一致（逐项列两边结果，spec-draft §9）
-			ops := make([]string, 0, len(diff))
-			for _, d := range diff {
+			ops := make([]string, 0, len(real))
+			for _, d := range real {
 				ops = append(ops, d.Section+" "+d.Key+" "+d.Op)
 			}
 			plan.issues = append(plan.issues, apidoc.Issue{Level: apidoc.LevelError, Code: apidoc.ErrDiffMismatchUnc,
@@ -921,6 +930,45 @@ func (s *Service) planDeclaredEntry(rdr apiImportReader, plan *apiDocPlan, p *ap
 			Line: ep.Line, Snippet: key, Want: "变更 ∈ 新增 / 修改 / 删除 / 未变更", Hint: ""})
 	}
 	return nil
+}
+
+// noteStructAmbiguous 命名结构歧义降级项的中文提示（D2：预览/结果卡要说清为什么没按破坏处理）。
+// 不新增错误码（W/E 码表封闭）——这类差异仍随明细落库、仍需人工确认，只是不拿它断言作者违约。
+func noteStructAmbiguous(plan *apiDocPlan, key string, diff []apidoc.DiffItem) {
+	names := map[string]bool{}
+	n := 0
+	for _, d := range diff {
+		if !apidoc.IsStructAmbiguous(d) {
+			continue
+		}
+		n++
+		// key 形如 <Schema>.<field> 或 <Schema>，取结构名供人去文档里定位
+		if i := strings.Index(d.Key, "."); i > 0 {
+			names[d.Key[:i]] = true
+		} else {
+			names[d.Key] = true
+		}
+	}
+	if n == 0 {
+		return
+	}
+	list := make([]string, 0, len(names))
+	for _, s := range sortedAmbiguousSchemaNames(names) {
+		list = append(list, "「"+s+"」")
+	}
+	plan.notes = append(plan.notes, key+"：命名结构 "+strings.Join(list, "、")+
+		" 存在同名不同构的多套定义（歧义），"+strconv.Itoa(n)+
+		" 条字段差异无法按名对齐，已降级为需人工确认，不参与破坏性判定")
+}
+
+// sortedAmbiguousSchemaNames 结构名排序，保证同一份文档每次导入的 notes 逐字一致（确定性）。
+func sortedAmbiguousSchemaNames(names map[string]bool) []string {
+	out := make([]string, 0, len(names))
+	for n := range names {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // entryNeedsWrite 判断既有条目是否需要重写（定义列逐一对照；hash 只是快速通道，

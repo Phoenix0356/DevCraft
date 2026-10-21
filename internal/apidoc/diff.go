@@ -21,7 +21,8 @@ type DiffItem struct {
 	After        any    `json:"after,omitempty"`
 	Breaking     bool   `json:"breaking"`               // 自动判破坏（三态里的 1）
 	NeedsConfirm bool   `json:"needsConfirm,omitempty"` // 需人工确认（三态里的 2，等同破坏处理）
-	Rule         string `json:"rule"`                   // oasdiff check id 词表（UI 统一 tooltip）
+	Rule         string `json:"rule"`                   // oasdiff check id 词表（UI 统一 tooltip）；
+	// 例外：struct-ambiguous（命名结构歧义降级项，见 RuleStructAmbiguous）是本包自有的 rule，不新增错误码。
 }
 
 // section 固定词表（与「位置」列取值一一对应，让「参数从 Query 挪到 Body」能被显式表达）。
@@ -539,6 +540,11 @@ func diffUpdated(section string, b, a Field, isRequest, isPath bool) (DiffItem, 
 }
 
 // diffSchemas 命名结构集合 diff（section 一律 response.body，key 用 <Schema> 或 <Schema>.<field>）。
+//
+// ambiguous 结构（同名不同构 → 解析层拒绝按名展开）走**降级通道**：涉及它的差异一律
+// Breaking=false + NeedsConfirm=true + rule=struct-ambiguous（D2）。理由：程序自己都认不出
+// 该用哪套定义时，没资格断言作者撒谎——10-21 事故里正是这种假差异把整批导入顶成 E-BREAKING-DENIED。
+// 降级只影响「破坏判定与作者违约裁决」，条目照旧进 diff 载荷（人要看得到、要二次确认）。
 func diffSchemas(bs, as []SchemaDef) []DiffItem {
 	var items []DiffItem
 	bIdx := map[string]int{}
@@ -553,14 +559,28 @@ func diffSchemas(bs, as []SchemaDef) []DiffItem {
 			aIdx[as[i].Name] = i
 		}
 	}
+	// 任一侧被标 ambiguous → 该名字下的全部差异都不可信（名字对齐本身就可能是撞名产物）
+	ambiguousName := func(name string) bool {
+		if i, ok := aIdx[name]; ok && as[i].Ambiguous {
+			return true
+		}
+		if i, ok := bIdx[name]; ok && bs[i].Ambiguous {
+			return true
+		}
+		return false
+	}
 	for j := range as {
 		a := as[j]
 		i, ok := bIdx[a.Name]
 		if !ok {
-			items = append(items, DiffItem{
+			it := DiffItem{
 				Section: SectionResponseBody, Key: a.Name, Op: OpAdded,
 				After: schemaFragment(a), Rule: "response-schema-added",
-			})
+			}
+			if ambiguousName(a.Name) {
+				downgradeAmbiguousItem(&it)
+			}
+			items = append(items, it)
 			continue
 		}
 		b := bs[i]
@@ -571,15 +591,37 @@ func diffSchemas(bs, as []SchemaDef) []DiffItem {
 		for k := range sub {
 			sub[k].Key = a.Name + "." + sub[k].Key
 		}
+		if ambiguousName(a.Name) {
+			sub = downgradeAmbiguous(sub)
+		}
 		items = append(items, sub...)
 	}
 	for i := range bs {
 		if _, still := aIdx[bs[i].Name]; !still {
-			items = append(items, DiffItem{
+			it := DiffItem{
 				Section: SectionResponseBody, Key: bs[i].Name, Op: OpRemoved,
 				Before: schemaFragment(bs[i]), Breaking: true, Rule: "response-schema-removed",
-			})
+			}
+			if ambiguousName(bs[i].Name) {
+				downgradeAmbiguousItem(&it)
+			}
+			items = append(items, it)
 		}
+	}
+	return items
+}
+
+// downgradeAmbiguousItem 单条降为「需人工确认、不算自动破坏」。
+func downgradeAmbiguousItem(it *DiffItem) {
+	it.Breaking = false
+	it.NeedsConfirm = true
+	it.Rule = RuleStructAmbiguous
+}
+
+// downgradeAmbiguous 把涉及 ambiguous 命名结构的 diff 项整组降级。
+func downgradeAmbiguous(items []DiffItem) []DiffItem {
+	for i := range items {
+		downgradeAmbiguousItem(&items[i])
 	}
 	return items
 }
@@ -607,12 +649,36 @@ func AggregateBreaking(items []DiffItem) int {
 	return BreakingNo
 }
 
+// RuleStructAmbiguous 涉及 ambiguous 命名结构（同名不同构）的 diff 项的 rule。
+// 这类项的 before/after 可能来自两套完全不同的表，字段增删本身就不可信。
+const RuleStructAmbiguous = "struct-ambiguous"
+
+// IsStructAmbiguous 该 diff 项是否因命名结构歧义被降级。
+func IsStructAmbiguous(it DiffItem) bool { return it.Rule == RuleStructAmbiguous }
+
+// AuthoritativeItems 参与「作者有没有撒谎」交叉校验的项：剔除 ambiguous 降级项。
+//
+// 用于 E-BREAKING-DENIED 与 E-DIFF-MISMATCH-UNCHANGED 两处裁决——程序自己都认不出该用
+// 哪套结构定义时，没资格断言作者的 breaking:false / 未变更 声明是假的（D2）。
+// 事件载荷本身不过滤：降级项仍随明细落库，只是 NeedsConfirm=true，人必须看一眼。
+func AuthoritativeItems(items []DiffItem) []DiffItem {
+	out := items[:0:0] // 不复用入参底层数组：调用方还要拿完整 diff
+	for _, it := range items {
+		if IsStructAmbiguous(it) {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
+}
+
 // ValidateBreakingOverride 人工覆盖校验（spec-draft §3.1/§7）：
 // 文档声明 breaking: false 而启发式判破坏 → 拒收（E-BREAKING-DENIED，由调用方落 Issue）；
 // 声明 true 而启发式非破坏 → 接受（人比规则懂业务）。
+// ambiguous 降级项不参与该判定（AuthoritativeItems），但真实破坏照旧拒收——闸门本身不许修哑。
 func ValidateBreakingOverride(decl int, items []DiffItem) bool {
 	if decl == 0 {
-		return AggregateBreaking(items) == BreakingNo
+		return AggregateBreaking(AuthoritativeItems(items)) == BreakingNo
 	}
 	return true
 }

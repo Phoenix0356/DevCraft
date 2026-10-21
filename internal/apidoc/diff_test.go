@@ -317,6 +317,122 @@ func TestBreakingOverride(t *testing.T) {
 	}
 }
 
+// newPageItemEps 构造 10-21 事故形态：同名结构 FavoriteVO 两套字段（item 与分页），
+// before 侧是库里被同名字段压成一行的分页表，after 侧是解析出的同名两条（ambiguous）。
+func collisionEps(ambiguous bool) (*Endpoint, *Endpoint) {
+	before := newEp("GET", "/api/v1.0/user/favorite")
+	paging := SchemaDef{Name: "FavoriteVO", Ambiguous: ambiguous, Fields: []Field{
+		rf("records", `List\<FavoriteVO\>`, RequiredUnknown, "", ""),
+		rf("total", "long", RequiredUnknown, "", ""),
+		rf("pages", "long", RequiredUnknown, "", ""),
+	}}
+	paging.BodyHash = schemaBodyHash(paging.Fields)
+	before.Schemas = []SchemaDef{paging}
+
+	after := newEp("GET", "/api/v1.0/user/favorite")
+	item := SchemaDef{Name: "FavoriteVO", Ambiguous: ambiguous, Fields: []Field{
+		rf("id", "String", RequiredUnknown, "", ""),
+		rf("paperId", "String", RequiredUnknown, "", ""),
+	}}
+	item.BodyHash = schemaBodyHash(item.Fields)
+	after.Schemas = []SchemaDef{item, paging}
+	return before, after
+}
+
+// TestDiffAmbiguousSchemaDowngraded 命名结构歧义（同名不同构）产生的差异一律降级：
+// Breaking=false + NeedsConfirm=true + rule=struct-ambiguous，且不得成为「作者违约」的证据（D2）。
+// 变异依据：删掉 diffSchemas 里的 ambiguousName 降级分支，本用例红（假破坏重新顶掉整批导入）。
+func TestDiffAmbiguousSchemaDowngraded(t *testing.T) {
+	before, after := collisionEps(true)
+	items := DiffEndpoints(before, after)
+	if len(items) == 0 {
+		t.Fatal("歧义差异仍要可见（降级 ≠ 静默）：事件载荷必须带着这些项让人确认")
+	}
+	for _, it := range items {
+		if it.Rule != RuleStructAmbiguous {
+			t.Fatalf("涉及 ambiguous 结构的项必须 rule=%s: %+v", RuleStructAmbiguous, it)
+		}
+		if it.Breaking {
+			t.Fatalf("程序自己都认不出该用哪套定义，不得自动判破坏: %+v", it)
+		}
+		if !it.NeedsConfirm {
+			t.Fatalf("降级项必须 NeedsConfirm（等同破坏处理，走确认闸）: %+v", it)
+		}
+	}
+	if got := AggregateBreaking(items); got != BreakingConfirm {
+		t.Fatalf("聚合 = %d, want 2（需人工确认）", got)
+	}
+	if !ValidateBreakingOverride(0, items) {
+		t.Fatal("声明 breaking:false 时不得因歧义噪声判作者违约（E-BREAKING-DENIED 必须放行）")
+	}
+	if n := len(AuthoritativeItems(items)); n != 0 {
+		t.Fatalf("AuthoritativeItems 应剔光全部降级项, got %d: %+v", n, items)
+	}
+	// 声明「未变更」的交叉校验同样只看权威项（E-DIFF-MISMATCH-UNCHANGED 的判据）
+	if len(AuthoritativeItems(items)) != 0 {
+		t.Fatal("歧义项不得进入「未变更却算出差异」的裁决")
+	}
+
+	// 整个结构名只在 before 存在（分页表被删）：删除是 ambiguous 名 → 一样降级
+	goneAfter := newEp("GET", "/api/v1.0/user/favorite")
+	goneAfter.Schemas = []SchemaDef{{Name: "SomethingElse", Fields: []Field{rf("x", "String", RequiredUnknown, "", "")}}}
+	goneAfter.Schemas[0].BodyHash = schemaBodyHash(goneAfter.Schemas[0].Fields)
+	sub := DiffEndpoints(before, goneAfter)
+	var removed *DiffItem
+	for i := range sub {
+		if sub[i].Key == "FavoriteVO" && sub[i].Op == OpRemoved {
+			removed = &sub[i]
+		}
+	}
+	if removed == nil || removed.Breaking || !removed.NeedsConfirm || removed.Rule != RuleStructAmbiguous {
+		t.Fatalf("ambiguous 结构的整名删除必须降级: %+v", removed)
+	}
+}
+
+// TestDiffRealSchemaBreakingNotDowngraded AC5 防退化：降级只针对 ambiguous。
+// 结构无歧义时，删响应字段 / 删整个命名结构必须照旧自动判破坏，breaking:false 声明照旧被拒。
+// 变异依据：若把降级条件写成「所有 response 结构差异都降级」（把闸门修哑），本用例红。
+func TestDiffRealSchemaBreakingNotDowngraded(t *testing.T) {
+	before, after := collisionEps(false) // 同名但都不标 ambiguous → 真实字段变化
+	items := DiffEndpoints(before, after)
+	removed := findItem(items, SectionResponseBody, "FavoriteVO.records", OpRemoved)
+	if removed == nil {
+		t.Fatalf("无歧义时必须照常算出字段删除: %+v", items)
+	}
+	if !removed.Breaking || removed.Rule != "response-property-removed" {
+		t.Fatalf("无歧义的响应字段删除必须自动破坏: %+v", removed)
+	}
+	if AggregateBreaking(items) != BreakingYes {
+		t.Fatalf("聚合 = %d, want 1", AggregateBreaking(items))
+	}
+	if ValidateBreakingOverride(0, items) {
+		t.Fatalf("声明 breaking:false 而程序判真破坏 → 仍必须拒收（E-BREAKING-DENIED）: %+v", items)
+	}
+
+	// 整个无歧义结构被删 → response-schema-removed 仍是自动破坏
+	goneAfter := newEp("GET", "/api/v1.0/user/favorite")
+	gone := DiffEndpoints(before, goneAfter)
+	it := findItem(gone, SectionResponseBody, "FavoriteVO", OpRemoved)
+	if it == nil || !it.Breaking || it.Rule != "response-schema-removed" {
+		t.Fatalf("无歧义的结构删除必须自动破坏: %+v", gone)
+	}
+	if ValidateBreakingOverride(0, gone) {
+		t.Fatal("结构删除 + breaking:false 声明必须仍被拒收")
+	}
+	// 响应字段删除（非结构域）也不受本次降级影响
+	b2 := newEp("POST", "/y")
+	b2.ResponseFields = []Field{rf("message", "String", RequiredUnknown, "", ""), rf("data", "String", RequiredUnknown, "", "")}
+	a2 := newEp("POST", "/y")
+	a2.ResponseFields = []Field{rf("message", "String", RequiredUnknown, "", "")}
+	realItems := DiffEndpoints(b2, a2)
+	if ValidateBreakingOverride(0, realItems) {
+		t.Fatalf("删响应字段仍必须判破坏、breaking:false 声明仍必须被拒收: %+v", realItems)
+	}
+	if n := len(AuthoritativeItems(realItems)); n != len(realItems) {
+		t.Fatalf("无歧义的差异不得被降级剔除: %+v", realItems)
+	}
+}
+
 func mustItem(t *testing.T, items []DiffItem, section, key, op string) *DiffItem {
 	t.Helper()
 	it := findItem(items, section, key, op)

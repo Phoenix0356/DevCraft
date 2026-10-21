@@ -101,22 +101,25 @@ func TestParseUserServiceGolden(t *testing.T) {
 		t.Fatalf("汇总自检 = %+v", doc.Summary)
 	}
 
-	// 同名 VO 冲突：IPage 两处定义不同构 → ambiguous + W-STRUCT-DIVERGED
+	// 同名 VO 冲突：两处 **IPage 分页结构** 定义不同构 → ambiguous + W-STRUCT-DIVERGED。
+	// 结构名 = IPage 分页：10-21 之前这里剥「分页结构」得到 IPage，与 **Foo 结构** 的剥法
+	// 叠在一起会让 **FavoriteVO 分页结构** 撞成 FavoriteVO（假破坏性差异的根源）。
+	// 「分页表仍与同族 item 表不同名」这条语义没变，只是名字里留着「分页」二字。
 	var ipages []*SchemaDef
 	for i := range doc.Schemas {
-		if doc.Schemas[i].Name == "IPage" {
+		if doc.Schemas[i].Name == "IPage 分页" {
 			ipages = append(ipages, &doc.Schemas[i])
 		}
 	}
 	if len(ipages) != 2 {
-		t.Fatalf("IPage 定义数 = %d, want 2", len(ipages))
+		t.Fatalf("IPage 分页 定义数 = %d, want 2", len(ipages))
 	}
 	for _, s := range ipages {
 		if !s.Ambiguous {
-			t.Fatalf("IPage 同名不同构必须标记 ambiguous: %+v", s)
+			t.Fatalf("IPage 分页 同名不同构必须标记 ambiguous: %+v", s)
 		}
 		if s.OwnerScope == "" || s.OwnerIdx < 0 {
-			t.Fatalf("IPage 的 owner_scope 必须是宿主接口: %+v", s)
+			t.Fatalf("IPage 分页 的 owner_scope 必须是宿主接口: %+v", s)
 		}
 	}
 	if !doc.HasCode(WarnStructDiverged) {
@@ -348,6 +351,165 @@ func TestParsePaperServiceGolden(t *testing.T) {
 			t.Fatalf("golden 文档不应有 curl 失配: line=%d snippet=%s", is.Line, is.Snippet)
 		}
 	}
+}
+
+// ===================== 分页结构撞名（10-21 事故复现）=====================
+
+// findSchema 按名取命名结构（fixture 断言用）。
+func findSchema(schemas []SchemaDef, name string) *SchemaDef {
+	for i := range schemas {
+		if schemas[i].Name == name {
+			return &schemas[i]
+		}
+	}
+	return nil
+}
+
+func schemaFieldNames(s *SchemaDef) []string {
+	if s == nil {
+		return nil
+	}
+	out := make([]string, 0, len(s.Fields))
+	for _, f := range s.Fields {
+		out = append(out, f.Name)
+	}
+	return out
+}
+
+// TestSchemaNameFromBoldKeepsPagingSuffix 钉住结构名归一规则本身（事故根因的单测位）：
+// 只剥尾部「结构」二字，**Foo 分页结构** 不得被归约成 **Foo 结构** 的同一个名字。
+// 变异依据：把旧的两级剥离（先「分页结构」再「结构」）加回来，本用例立刻红。
+func TestSchemaNameFromBoldKeepsPagingSuffix(t *testing.T) {
+	cases := []struct{ title, want string }{
+		{"FavoriteVO 结构", "FavoriteVO"},
+		{"FavoriteVO 分页结构", "FavoriteVO 分页"}, // 旧行为剥成 FavoriteVO → 与上一行撞名（假破坏的源头）
+		{"IPage 分页结构", "IPage 分页"},           // 旧基线写法同样保持独立名（D6：两种命名都不撞名）
+		{"  SubscriptionVO 结构  ", "SubscriptionVO"},
+		{"Brief", "Brief"}, // 没有「结构」后缀就原样保留
+		{"PaperVO 结构说明", "PaperVO 结构说明"},
+	}
+	for _, c := range cases {
+		if got := schemaNameFromBold(c.title); got != c.want {
+			t.Fatalf("schemaNameFromBold(%q) = %q, want %q", c.title, got, c.want)
+		}
+	}
+	if schemaNameFromBold("FavoriteVO 分页结构") == schemaNameFromBold("FavoriteVO 结构") {
+		t.Fatal("分页表与 item 表必须归一成两个不同名字")
+	}
+}
+
+// TestParsePagingCollisionFixture 用真实文档片段（testdata/paperpilot-paging-collision.md，
+// 摘自用户 PaperPilot-接口文档-v1.md 的 9.1/9.2 收藏与 13.2 反馈三节）钉住修复效果：
+// 分页表与 item 表各自是独立命名结构、字段不合并、都不标 ambiguous、零 W-STRUCT-DIVERGED。
+// 变异依据：恢复旧的「分页结构」剥离后，本 fixture 里 FavoriteVO（行 47/59/121 三条定义）与
+// FeedbackVO（行 190/203）各自撞成一个名字 → 实测 2 条 W-STRUCT-DIVERGED、5 条结构全标
+// ambiguous；用户那份 46 接口文档据此整批 E-BREAKING-DENIED（详见 appsvc 同名导入用例的对照注释）。
+func TestParsePagingCollisionFixture(t *testing.T) {
+	doc := Parse(readFixture(t, "paperpilot-paging-collision.md"), Options{})
+	for _, is := range doc.Errors() {
+		t.Logf("E %s line=%d snippet=%s hint=%s", is.Code, is.Line, is.Snippet, is.Hint)
+	}
+	if doc.HasErrors() {
+		t.Fatalf("规范模式（scope: incremental）解析真实片段不应产生 E-*，共 %d 条", len(doc.Errors()))
+	}
+	if doc.Mode != ModeIncremental {
+		t.Fatalf("mode = %s, want incremental", doc.Mode)
+	}
+	if len(doc.Endpoints) != 3 {
+		keys := []string{}
+		for _, e := range doc.Endpoints {
+			keys = append(keys, e.IdentityKey)
+		}
+		t.Fatalf("接口数 = %d %v, want 3", len(doc.Endpoints), keys)
+	}
+	if doc.HasCode(WarnStructDiverged) {
+		for _, is := range doc.Warnings() {
+			t.Logf("W-STRUCT-DIVERGED %+v", is)
+		}
+		t.Fatal("分页表与 item 表不撞名后不得再有 W-STRUCT-DIVERGED（AC1）")
+	}
+
+	getFav := doc.FindEndpoint("GET|/api/v1.0/user/favorite")
+	item := findSchema(getFav.Schemas, "FavoriteVO")
+	if item == nil {
+		t.Fatalf("9.1 缺 **FavoriteVO 结构**: %v", schemaNames(getFav.Schemas))
+	}
+	if want := []string{"id", "paperId", "title", "arxivId", "doi", "briefSnapshot", "createTime"}; !equalNames(schemaFieldNames(item), want) {
+		t.Fatalf("FavoriteVO 字段 = %v, want %v（item 表必须独立成结构，不被分页字段污染）", schemaFieldNames(item), want)
+	}
+	page := findSchema(getFav.Schemas, "FavoriteVO 分页")
+	if page == nil {
+		t.Fatalf("9.1 缺 **FavoriteVO 分页结构**: %v", schemaNames(getFav.Schemas))
+	}
+	if want := []string{"records", "total", "size", "current", "pages"}; !equalNames(schemaFieldNames(page), want) {
+		t.Fatalf("FavoriteVO 分页 字段 = %v, want %v", schemaFieldNames(page), want)
+	}
+	for _, s := range []*SchemaDef{item, page} {
+		if s.Ambiguous {
+			t.Fatalf("两套字段属于两个不同结构名，不得标 ambiguous: %+v", s)
+		}
+		if s.OwnerScope != getFav.IdentityKey || s.OwnerIdx < 0 {
+			t.Fatalf("分页表与 item 表都必须作为命名结构挂在接口下: %+v", s)
+		}
+	}
+	if item.BodyHash == page.BodyHash {
+		t.Fatal("两套字段的 bodyHash 必须不同（撞名同源同味的判据本身不能失效）")
+	}
+	// IPage<FavoriteVO> 仍按类型字符串展示（D5：不做泛型展开）
+	var dataField *Field
+	for i := range getFav.ResponseFields {
+		if getFav.ResponseFields[i].Name == "data" {
+			dataField = &getFav.ResponseFields[i]
+		}
+	}
+	if dataField == nil || dataField.TypeRaw != `IPage\<FavoriteVO\>` {
+		t.Fatalf("返回参数 data 的类型原文必须保真（不展开泛型）: %+v", dataField)
+	}
+
+	// 9.2 里重复内联的 **FavoriteVO 结构** 与 9.1 同构 → 跨接口同名也不标 ambiguous
+	postFav := doc.FindEndpoint("POST|/api/v1.0/user/favorite")
+	again := findSchema(postFav.Schemas, "FavoriteVO")
+	if again == nil || again.Ambiguous || again.BodyHash != item.BodyHash {
+		t.Fatalf("9.2 的 FavoriteVO 应与 9.1 同构且不标 ambiguous: %+v", again)
+	}
+
+	// 13.2 反馈一节同样两套并存（真实复现里它产出的正是 E-DIFF-MISMATCH-UNCHANGED）
+	feedback := doc.FindEndpoint("GET|/api/v1.0/user/feedback")
+	fbItem := findSchema(feedback.Schemas, "FeedbackVO")
+	fbPage := findSchema(feedback.Schemas, "FeedbackVO 分页")
+	if fbItem == nil || fbPage == nil {
+		t.Fatalf("13.2 缺 FeedbackVO / FeedbackVO 分页 两套结构: %v", schemaNames(feedback.Schemas))
+	}
+	if len(fbItem.Fields) != 8 || len(fbPage.Fields) != 5 {
+		t.Fatalf("FeedbackVO 字段数 = %d, 分页 = %d, want 8 / 5", len(fbItem.Fields), len(fbPage.Fields))
+	}
+	for _, s := range []*SchemaDef{fbItem, fbPage, item, page, again} {
+		for i := range doc.Schemas {
+			if doc.Schemas[i].Name == s.Name && doc.Schemas[i].Ambiguous {
+				t.Fatalf("registry 里 %s 被标 ambiguous（撞名残留）: %+v", s.Name, doc.Schemas[i])
+			}
+		}
+	}
+}
+
+func schemaNames(schemas []SchemaDef) []string {
+	out := make([]string, 0, len(schemas))
+	for _, s := range schemas {
+		out = append(out, s.Name)
+	}
+	return out
+}
+
+func equalNames(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ===================== 确定性 =====================

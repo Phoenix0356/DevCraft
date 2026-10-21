@@ -146,8 +146,9 @@ type TableHeader struct {
 	Line    int      `json:"line"`
 }
 
-// SchemaDef 命名结构（**Xxx 结构**： + 表）。主键 (name, owner_scope)；
-// 同名不同构 → Ambiguous=1 并拒绝按名自动展开，只报 W-STRUCT-DIVERGED。
+// SchemaDef 命名结构（**Xxx 结构**： + 表；分页表 **Xxx 分页结构** 是另一个独立结构名）。
+// 落库主键 (project_id, name, owner_scope)；歧义判定按 name 全文档全局分组（见 buildSchemas
+// 趟 7 第 3 步）：同名不同构 → Ambiguous=1 并拒绝按名自动展开，只报 W-STRUCT-DIVERGED。
 type SchemaDef struct {
 	Name        string  `json:"name"`
 	OwnerScope  string  `json:"ownerScope"` // '' = 文档级；否则 = 宿主接口 identity_key
@@ -1780,7 +1781,13 @@ func (p *parser) buildSchemas() {
 			p.doc.Schemas = append(p.doc.Schemas, sd)
 		}
 	}
-	// 3) 同名不同构 → ambiguous=1 且拒绝按名展开（主键 (name, owner_scope)）
+	// 3) 同名不同构 → ambiguous=1 且拒绝按名展开。
+	//    口径（与落库主键不是一回事，别混）：
+	//      - 歧义分组键 = **name 本身，全文档全局**；
+	//      - 落库主键   = (project_id, name, owner_scope)（store/api.go 的 SaveApiSchema upsert）。
+	//    这里刻意比落库主键更严（D4 裁决保持行为，只改注释）：跨接口内联重复定义同一个 VO
+	//    是这类文档的常态，而「两个接口里的同名结构字段集合真不一样」是**人需要知道的文档气味**，
+	//    所以只出 W-STRUCT-DIVERGED 提示、不升 E、不阻断导入。
 	byName := map[string][]int{}
 	for i := range p.doc.Schemas {
 		byName[p.doc.Schemas[i].Name] = append(byName[p.doc.Schemas[i].Name], i)
@@ -1809,8 +1816,8 @@ func (p *parser) buildSchemas() {
 			p.doc.Schemas[i].Ambiguous = true
 			lines = append(lines, strconv.Itoa(p.doc.Schemas[i].Line))
 		}
-		p.issueAt(LevelWarning, WarnStructDiverged, p.doc.Schemas[distinct[order[1]]].Line, "**"+n+" 结构**",
-			"同名命名结构必须同构（主键 (name, owner_scope)）",
+		p.issueAt(LevelWarning, WarnStructDiverged, p.doc.Schemas[distinct[order[1]]].Line, n,
+			"同名命名结构必须同构（歧义按 name 全局分组，跨接口同名不同构同样计入）",
 			"「"+n+"」存在 "+strconv.Itoa(len(order))+" 种不同定义（行 "+strings.Join(lines, "、")+"），已全部标记 ambiguous，拒绝按名自动展开")
 	}
 	// 4) 同步 endpoint 内嵌副本的 ambiguous 标记
@@ -1829,11 +1836,18 @@ func (p *parser) buildSchemas() {
 	}
 }
 
+// schemaNameFromBold 命名结构粗体标题 → 结构名：只剥尾部「结构」（**Foo 结构** → Foo）。
+//
+// ⚠️ 这里曾先剥「分页结构」再剥「结构」，于是 **FavoriteVO 分页结构** 与
+// **FavoriteVO 结构** 归一为同一个 name：两套完全不同的字段（item 的 id/paperId/title/...
+// 与分页的 records/total/size/current/pages）同名 → buildSchemas 标 ambiguous →
+// 落库时两条结构互相覆盖（api_schemas 唯一键 (project_id, name, owner_scope)）→
+// 响应结构 diff 算出「item 字段全新增 + 分页字段全删除」的**假差异** → 「响应字段删除」
+// 命中破坏性启发式 → breaking=1 → 撞上文档声明的 breaking: false → 整批 E-BREAKING-DENIED
+// 拒收（10-21 事故：PaperPilot-接口文档-v1.md 46 个接口全灭）。
+// 「结构」后缀照旧剥，分页表因此保持独立结构名（**Foo 分页结构** → Foo 分页），不与 Foo 撞名。
 func schemaNameFromBold(title string) string {
 	s := strings.TrimSpace(title)
-	if t := strings.TrimSuffix(s, "分页结构"); t != s {
-		return strings.TrimSpace(t)
-	}
 	if t := strings.TrimSuffix(s, "结构"); t != s {
 		return strings.TrimSpace(t)
 	}
