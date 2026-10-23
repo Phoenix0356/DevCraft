@@ -73,7 +73,7 @@ export class DiffItem {
         }
         if (!("rule" in $$source)) {
             /**
-             * oasdiff check id 词表（UI 统一 tooltip）
+             * oasdiff check id 词表（UI 统一 tooltip）；
              * @member
              * @type {string}
              */

@@ -1369,6 +1369,14 @@ export class Session {
              */
             this["agentId"] = "";
         }
+        if (!("titleSource" in $$source)) {
+            /**
+             * 空串=首条消息截断占位 | 'ai' | 'manual'（见标题来源常量）
+             * @member
+             * @type {string}
+             */
+            this["titleSource"] = "";
+        }
         if (!("createdAt" in $$source)) {
             /**
              * @member

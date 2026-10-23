@@ -56,17 +56,26 @@ func newTestService(t *testing.T) *Service {
 
 	var mu sync.Mutex
 	var doneErrs []string
+	var titleFrames []map[string]any
 	svc := New(st, agents, skills, dockerx.NewManager(), box, func(event string, payload map[string]any) {
-		if event != EventDone {
-			return
+		switch event {
+		case EventDone:
+			mu.Lock()
+			if e, _ := payload["error"].(string); e != "" {
+				doneErrs = append(doneErrs, e)
+			}
+			mu.Unlock()
+		case EventSessionTitle:
+			mu.Lock()
+			titleFrames = append(titleFrames, payload)
+			mu.Unlock()
 		}
-		mu.Lock()
-		if e, _ := payload["error"].(string); e != "" {
-			doneErrs = append(doneErrs, e)
-		}
-		mu.Unlock()
 	})
 	svc.newLLM = func(string, string) llm.Client { return blockingLLM{} }
+	// 默认关掉"回合成功后异步总结标题"：见 Service.disableAutoTitle 注释
+	// （否则多用例会多出一次并发 LLM 请求，打断按请求序列断言的回合用例）。
+	// 标题自己的用例需要真链路时显式置回 false。
+	svc.disableAutoTitle = true
 
 	// 预置 LLM 设置（密文落库，走真实加密路径）
 	enc, err := box.Encrypt("sk-test")
@@ -86,12 +95,21 @@ func newTestService(t *testing.T) *Service {
 		defer mu.Unlock()
 		return append([]string(nil), doneErrs...)
 	}
+	// 同理：捕获收到的 session:title 帧载荷（自动标题用例断言帧内容用）
+	titleFramesHook = func() []map[string]any {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]map[string]any(nil), titleFrames...)
+	}
 	return svc
 }
 
 // doneErrsHook 由 newTestService 设置，用例用它读取收到的 done 错误文案。
 // （包级变量仅测试使用；同一包内测试串行执行，无需并发保护。）
 var doneErrsHook func() []string
+
+// titleFramesHook 由 newTestService 设置，用例用它读取收到的 session:title 帧载荷。
+var titleFramesHook func() []map[string]any
 
 // lastTestDBPath 由 newTestService 设置：最近一个测试库的文件路径
 // （apidoc 拒收零残留断言用它开独立的只读连接做全表计数）。

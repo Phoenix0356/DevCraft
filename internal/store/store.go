@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS sessions (          -- 会话表：一个会话绑定
 	id         TEXT PRIMARY KEY,                 -- UUID 字符串主键
 	title      TEXT NOT NULL DEFAULT '',
 	agent_id   TEXT NOT NULL DEFAULT '',
+	title_source TEXT NOT NULL DEFAULT '',       -- 标题来源：''=首条消息截断占位 | 'ai'=AI 总结 | 'manual'=手动改名（锁定，AI 永不再覆盖）
 	created_at INTEGER NOT NULL,                 -- 毫秒时间戳（SQLite 无日期类型，惯例存整数）
 	updated_at INTEGER NOT NULL
 );
@@ -244,7 +245,85 @@ CREATE INDEX IF NOT EXISTS idx_api_batch_scope ON api_import_batches(scope_ident
 	if err != nil {
 		return fmt.Errorf("migrate schema: %w", err)
 	}
+	// CREATE TABLE IF NOT EXISTS 只管新库；存量库的表结构演进靠下面的幂等加列。
+	return ensureColumns(db)
+}
+
+// ensureColumns 为存量库补齐后加的列（本仓库唯一的加列迁移入口）。
+// 每一步都必须失败可感知：迁移失败会一路返回到 Open，让启动阶段直接暴露问题，
+// 绝不静默跳过（列缺失会让后面的读写全部报错，静默只会把故障推迟到更难定位的地方）。
+func ensureColumns(db *sql.DB) error {
+	return ensureSessionColumn(db, "title_source",
+		`ALTER TABLE sessions ADD COLUMN title_source TEXT NOT NULL DEFAULT ''`)
+}
+
+// sessionsTableInfoSQL 查 sessions 表结构。表名在本包内写死成常量，不接任何外部输入
+// （PRAGMA 的表名不能走 ? 占位符，只能拼字符串——所以把可拼的部分收敛成常量，
+// 杜绝标识符注入面）。
+const sessionsTableInfoSQL = `PRAGMA table_info(sessions)`
+
+// ensureSessionColumn 幂等加列：先 PRAGMA table_info 探测列是否存在，缺了才 ALTER TABLE。
+// 三种库都要干净通过：
+//   - 全新库：CREATE TABLE 已带该列 → 探测命中 → 跳过；
+//   - 存量库无该列：探测未命中 → ALTER 加列（DEFAULT 让旧行取空串）；
+//   - 存量库已有该列（历史上跑过旧版迁移的机器）：探测命中 → 跳过，绝不重复 ALTER。
+func ensureSessionColumn(db *sql.DB, column, alterDDL string) error {
+	rows, err := db.Query(sessionsTableInfoSQL)
+	if err != nil {
+		return fmt.Errorf("读取 sessions 表结构失败: %w", err)
+	}
+	defer rows.Close()
+	exists := false
+	for rows.Next() {
+		name, err := scanColumnInfo(rows)
+		if err != nil {
+			return fmt.Errorf("解析 sessions 表结构失败: %w", err)
+		}
+		if name == column {
+			exists = true
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("遍历 sessions 表结构失败: %w", err)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := db.Exec(alterDDL); err != nil {
+		return fmt.Errorf("为 sessions 添加列 %s 失败: %w", column, err)
+	}
 	return nil
+}
+
+// scanColumnInfo 读 PRAGMA table_info 当前行（列顺序固定：cid, name, type,
+// notnull, dflt_value, pk），只取列名。
+func scanColumnInfo(rows *sql.Rows) (string, error) {
+	var cid, notNull, pk int
+	var name, colType string
+	var dfltValue sql.NullString
+	if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+// sessionColumns 查 sessions 表的列名清单（仅测试用于断言列没有被重复添加）。
+func (s *Store) sessionColumns() ([]string, error) {
+	rows, err := s.db.Query(sessionsTableInfoSQL)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		name, err := scanColumnInfo(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
 }
 
 // ===================== Sessions（会话 CRUD）=====================
@@ -253,14 +332,23 @@ CREATE INDEX IF NOT EXISTS idx_api_batch_scope ON api_import_batches(scope_ident
 // `json:"id"` 告诉 JSON 序列化器字段名叫 id（≈ Jackson 的 @JsonProperty("id")）。
 // Wails 把 Go 对象传给前端时就是按这些 tag 序列化的。
 type Session struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	AgentID   string `json:"agentId"`
-	CreatedAt int64  `json:"createdAt"`
-	UpdatedAt int64  `json:"updatedAt"`
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	AgentID     string `json:"agentId"`
+	TitleSource string `json:"titleSource"` // 空串=首条消息截断占位 | 'ai' | 'manual'（见标题来源常量）
+	CreatedAt   int64  `json:"createdAt"`
+	UpdatedAt   int64  `json:"updatedAt"`
 }
 
+// 标题来源取值（sessions.title_source 列的状态机，见 appsvc/title.go）。
+const (
+	TitleSourceAI     = "ai"     // AI 自动总结写入
+	TitleSourceManual = "manual" // 手动改名，永久锁定（AI 不再覆盖）
+)
+
 // CreateSession 插入新会话。
+// title_source 不在 INSERT 列里：新建会话必然是占位态（空串），由列 DEFAULT 落位，
+// 不给调用方"带着别的来源创建"的机会（状态只能靠下面的定向写入推进）。
 func (s *Store) CreateSession(sess Session) error {
 	now := time.Now().UnixMilli() // 毫秒时间戳
 	if sess.CreatedAt == 0 {
@@ -276,7 +364,7 @@ func (s *Store) CreateSession(sess Session) error {
 
 // ListSessions 按最后活跃时间倒序返回全部会话。
 func (s *Store) ListSessions() ([]Session, error) {
-	rows, err := s.db.Query(`SELECT id, title, agent_id, created_at, updated_at FROM sessions ORDER BY updated_at DESC`)
+	rows, err := s.db.Query(`SELECT id, title, agent_id, title_source, created_at, updated_at FROM sessions ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +373,7 @@ func (s *Store) ListSessions() ([]Session, error) {
 	for rows.Next() {  // 逐行迭代（≈ ResultSet.next()）
 		var sess Session
 		// Scan 把当前行各列按顺序读入变量（列顺序必须与 SELECT 一致）
-		if err := rows.Scan(&sess.ID, &sess.Title, &sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+		if err := rows.Scan(&sess.ID, &sess.Title, &sess.AgentID, &sess.TitleSource, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
 			return nil, err // & 取地址：Scan 需要指针才能写入（≈ 传引用）
 		}
 		out = append(out, sess)
@@ -297,20 +385,84 @@ func (s *Store) ListSessions() ([]Session, error) {
 func (s *Store) GetSession(id string) (Session, error) {
 	var sess Session
 	// QueryRow 用于"最多一行"的查询，Scan 时若没数据会得到哨兵错误 sql.ErrNoRows
-	err := s.db.QueryRow(`SELECT id, title, agent_id, created_at, updated_at FROM sessions WHERE id = ?`, id).
-		Scan(&sess.ID, &sess.Title, &sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt)
+	err := s.db.QueryRow(`SELECT id, title, agent_id, title_source, created_at, updated_at FROM sessions WHERE id = ?`, id).
+		Scan(&sess.ID, &sess.Title, &sess.AgentID, &sess.TitleSource, &sess.CreatedAt, &sess.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return sess, fmt.Errorf("session %s not found", id)
 	}
 	return sess, err
 }
 
-// UpdateSession 更新标题/绑定 Agent，并刷新 updated_at（用于列表排序）。
-func (s *Store) UpdateSession(sess Session) error {
-	sess.UpdatedAt = time.Now().UnixMilli()
-	_, err := s.db.Exec(`UPDATE sessions SET title = ?, agent_id = ?, updated_at = ? WHERE id = ?`,
-		sess.Title, sess.AgentID, sess.UpdatedAt, sess.ID)
-	return err
+// ===================== Sessions 定向写入（列所有权）=====================
+//
+// 这里刻意没有"全字段 UPDATE"的口子：会话行由多个写入方并发演进（占位标题、
+// AI 异步总结、手动改名、@前缀切 Agent），全字段回写会把调用方读到的陈旧内存值
+// 盖回数据库，冲掉别的写入方刚写进去的列。所以每个写入方只写自己拥有的列，
+// 并且把"能不能写"的判断也放进 SQL 条件里（保护逻辑落在库里，不靠调用方自律）。
+// 返回值 bool = 是否真的写入了（RowsAffected > 0），false 表示被 WHERE 条件挡下。
+
+// UpdateSessionTitle AI 总结写标题：只在标题不是手动改过的情况下生效。
+// title_source='manual' 的行被 WHERE 永久排除——手动改名保护由 SQL 条件保证。
+func (s *Store) UpdateSessionTitle(id, title string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE sessions SET title = ?, title_source = ?, updated_at = ?
+		 WHERE id = ? AND title_source <> ?`,
+		title, TitleSourceAI, time.Now().UnixMilli(), id, TitleSourceManual)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// SetSessionTitleManual 手动改名：写标题并把来源锁成 manual（此后 AI 永不再覆盖）。
+func (s *Store) SetSessionTitleManual(id, title string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE sessions SET title = ?, title_source = ?, updated_at = ? WHERE id = ?`,
+		title, TitleSourceManual, time.Now().UnixMilli(), id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// SetSessionFallbackTitle 首条消息截断的占位标题定向写入。
+// 守卫在 SQL 里：仅当标题仍是"新会话"/空 且 未被手动改名时才写——
+// 这样并发的 AI 总结先落库后，占位写入自然落空（不会用截断文本盖掉 AI 标题）。
+func (s *Store) SetSessionFallbackTitle(id, title string) (bool, error) {
+	res, err := s.db.Exec(
+		`UPDATE sessions SET title = ?, updated_at = ?
+		 WHERE id = ? AND (title = '' OR title = '新会话') AND title_source <> ?`,
+		title, time.Now().UnixMilli(), id, TitleSourceManual)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// SetSessionAgentID 只改会话绑定的 Agent（不触碰标题与来源）。
+func (s *Store) SetSessionAgentID(id, agentID string) (bool, error) {
+	res, err := s.db.Exec(`UPDATE sessions SET agent_id = ?, updated_at = ? WHERE id = ?`,
+		agentID, time.Now().UnixMilli(), id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // DeleteSession 级联删除会话和它的所有消息。

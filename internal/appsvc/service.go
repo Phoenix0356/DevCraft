@@ -91,6 +91,17 @@ type Service struct {
 	// 门禁：写入路径只能通过 takeApiDocApproval 从这里取单，未批准一行不写（D16）。
 	apiApprovalsMu sync.Mutex
 	apiApprovals   map[string]*ApiDocApproval
+
+	// 正在进行异步标题总结的会话集合（in-flight 去重）：同一会话只允许一个总结任务在飞，
+	// 避免两个并发回合都看到占位标题而重复调 LLM、连发两帧标题。
+	titleGenMu sync.Mutex
+	titleGen   map[string]struct{}
+
+	// disableAutoTitle 是单测开关：置 true 时回合结束后不再触发异步标题总结。
+	// 生产路径永远用零值 false（功能默认开启），只有测试在 newTestService 里关掉它——
+	// 因为总结会多发起一次 LLM 请求，依赖"请求序列/最后一次请求内容"做断言的
+	// 回合类用例会被这个并发请求打乱。
+	disableAutoTitle bool
 }
 
 // New 构造 Service。newLLM 默认指向真实的 OpenAI 适配器。
@@ -106,6 +117,7 @@ func New(st *store.Store, agents *agent.Registry, skills *skill.Registry, docker
 		turns:        map[string]*turnEntry{},
 		approvals:    map[string]*Approval{},
 		apiApprovals: map[string]*ApiDocApproval{},
+		titleGen:     map[string]struct{}{},
 	}
 	s.deployRunnerFor = s.deployStepRunner // 自引用默认值；测试可整体替换
 	return s
@@ -366,6 +378,8 @@ func (s *Service) NewSession() (store.Session, error) {
 func (s *Service) DeleteSession(id string) error { return s.store.DeleteSession(id) }
 
 // SetSessionAgent 给会话切换 Agent（前端 Agent 下拉框）。
+// 定向只写 agent_id：不做全字段回写，避免用本函数刚读到的陈旧 title/title_source
+// 盖掉并发写入的标题（见 store 的"列所有权"注释）。
 func (s *Service) SetSessionAgent(sessionID, agentID string) error {
 	sess, err := s.store.GetSession(sessionID)
 	if err != nil {
@@ -374,8 +388,8 @@ func (s *Service) SetSessionAgent(sessionID, agentID string) error {
 	if _, err := s.agents.Get(agentID); err != nil { // 校验目标 Agent 存在
 		return err
 	}
-	sess.AgentID = agentID
-	return s.store.UpdateSession(sess)
+	_, err = s.store.SetSessionAgentID(sess.ID, agentID)
+	return err
 }
 
 // Messages 会话全部历史（前端打开会话时加载）。
@@ -435,8 +449,9 @@ func (s *Service) SendMessage(ctx context.Context, sessionID, text string) error
 	if prefix, rest, ok := parseAgentPrefix(text); ok {
 		if a, err := s.matchAgent(prefix); err == nil {
 			sess.AgentID = a.ID
-			_ = s.store.UpdateSession(sess) // 顺带把会话绑定切过去
-			text = rest                     // 去掉前缀，只把真正的问题发给模型
+			// 定向只写 agent_id（同样不碰标题列）：顺带把会话绑定切过去
+			_, _ = s.store.SetSessionAgentID(sessionID, a.ID)
+			text = rest // 去掉前缀，只把真正的问题发给模型
 		}
 		// 匹配失败时静默忽略前缀，走默认 Agent（容错）
 	}
@@ -458,10 +473,13 @@ func (s *Service) SendMessage(ctx context.Context, sessionID, text string) error
 	if err := s.store.AppendMessage(store.Message{SessionID: sessionID, Role: "user", Content: text}); err != nil {
 		return err
 	}
-	// 首条消息自动成为会话标题（≈ 聊天软件惯例）
+	// 首条消息自动成为会话标题（≈ 聊天软件惯例）——AI 总结出来之前的占位标题。
+	// 定向 UPDATE：条件（标题仍是占位 + 未手动改名）落在 SQL 里，
+	// 所以并发的 AI 总结先落库时，这里自然写不进去，不会盖掉 AI 标题。
 	if sess.Title == "新会话" || sess.Title == "" {
-		sess.Title = truncate(text, 30)
-		_ = s.store.UpdateSession(sess)
+		fallback := truncate(text, 30)
+		_, _ = s.store.SetSessionFallbackTitle(sessionID, fallback)
+		sess.Title = fallback
 	}
 
 	// 读 LLM 配置（失败=未配置 Key，发 done 事件让前端提示）
@@ -521,6 +539,9 @@ func (s *Service) SendMessage(ctx context.Context, sessionID, text string) error
 	}
 	slog.Info("Agent 回合结束", "session", sessionID, "answerLen", len([]rune(answer)))
 	s.emitDone(sessionID, answer, "")
+	// 回合成功收尾后尝试异步标题总结（仅 title_source=='' 时真正起 goroutine）；
+	// 失败静默降级保留上面的截断占位标题，见 title.go。
+	s.maybeSummarizeTitle(sessionID)
 	return nil
 }
 

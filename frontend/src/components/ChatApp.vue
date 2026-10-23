@@ -1033,7 +1033,7 @@ function onDone(payload) {
 }
 
 // 聊天流连接（模块级变量：生命周期钩子间共享）。
-// 帧格式与 Go 端 emitChat 对应：{event: 'chat:delta'|'chat:tool'|'chat:done', payload: {...}}
+// 帧格式与 Go 端 emitChat 对应：{event: 'chat:delta'|'chat:tool'|'chat:done'|'deploy:*'|'api:*'|'session:title', payload: {...}}
 let chatStream = null
 
 /** 流帧分发：按事件名路由到对应回调。
@@ -1054,7 +1054,17 @@ function onStreamFrame(ev) {
     case 'deploy:done': onDeployDone(frame.payload); break
     case 'api:approval': onApiDocApproval(frame.payload); break
     case 'api:done': onApiDocDone(frame.payload); break
+    case 'session:title': onSessionTitle(frame.payload); break
   }
+}
+
+/** session:title：AI 总结出的新标题（回合结束后异步生成，几秒后到达）。
+ *  只按 sessionId 更新侧栏对应项的标题（不整表重拉 ListSessions、不动消息区、
+ *  不动 streaming——标题帧与回合内容完全无关，重拉列表还会覆盖本地编辑态）。
+ *  别的会话的帧同样处理：侧栏是全会话共用的列表。 */
+function onSessionTitle(payload) {
+  if (!payload || !payload.sessionId || !payload.title) return
+  applyTitle(payload.sessionId, payload.title)
 }
 
 // ---------------- 生命周期 ----------------
