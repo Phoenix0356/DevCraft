@@ -639,7 +639,7 @@ function downloadFixedText() {
   }
 }
 
-/** 复制修正稿：走与代码块「复制」同一个 copyText（navigator.clipboard → execCommand 双路） */
+/** 复制修正稿：走与代码块「复制」同一个 copyText（共用 helper，双路降级见 lib/clipboard.js） */
 async function copyFixedText() {
   const card = apiImport.value
   const text = card?.fixedText || ''

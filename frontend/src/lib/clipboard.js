@@ -1,5 +1,5 @@
-// 剪贴板写入的统一小工具（单一实现，两处共用：ChatApp 里 markdown 代码块标题栏的
-// 「复制」、ApiDocManager 的「导出规范」降级路径）。
+// 剪贴板写入的统一小工具（单一实现，三处共用：ChatApp 的 markdown 代码块「复制」与
+// 修正稿复制、ApiDocManager 的「导出规范」、ApiEntryDetail 的路径/身份键/示例复制）。
 // 为什么要两条路：
 //   ① navigator.clipboard.writeText —— 安全上下文（桌面 Wails WebView、浏览器 https）
 //      下的标准异步 API；但服务器模式用 http 访问属于非安全上下文，浏览器可能直接

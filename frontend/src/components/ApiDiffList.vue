@@ -8,12 +8,15 @@
     · FieldFragment.required 是 -1/0/1 哨兵（-1 未知 / 0 否 / 1 是），不是布尔值。
     · 展示类型用 fragment.type（= type_raw 显示值），不使用归一化的 type_key。
     · added/restored 明细的 diff 是空数组，本组件收到空数组时显示说明文案。
+    · rule 展示中文短语（lib/apidoc-rules.js 映射），原始 oasdiff id 保留在 title tooltip
+      里（排查解析问题要用 id 反查 diff.go）；词表未收录的 id 原样显示，不空白。
 
   props：{diff: Array}  —— apidoc.DiffItem[]
   emit：无（纯展示）
 -->
 <script setup>
 import {computed} from 'vue'
+import {ruleLabel, ruleDesc} from '../lib/apidoc-rules'
 
 const props = defineProps({
   diff: {type: Array, default: () => []}
@@ -78,18 +81,26 @@ function fmtFragment(v) {
   return fmtField(v) || '—'
 }
 
-const rows = computed(() => (props.diff || []).map(d => ({
-  section: sectionLabel(d.section),
-  key: d.key || '-',
-  op: opLabel(d.op),
-  opRaw: d.op || '',
-  before: fmtFragment(d.before),
-  after: fmtFragment(d.after),
-  verdict: d.breaking ? '破坏性' : (d.needsConfirm ? '需人工确认' : '非破坏'),
-  isBreak: !!d.breaking,
-  isConfirm: !d.breaking && !!d.needsConfirm,
-  rule: d.rule || ''
-})))
+const rows = computed(() => (props.diff || []).map(d => {
+  // rule 三件套：原 id 保留（tooltip 兜底展示），中文短语走映射表；
+  // 未收录 id 时 ruleLabel 原样返回 id（zh === rule），tooltip 就只显示 id 不重复拼接。
+  const rule = d.rule || ''
+  const zh = ruleLabel(rule)
+  return {
+    section: sectionLabel(d.section),
+    key: d.key || '-',
+    op: opLabel(d.op),
+    opRaw: d.op || '',
+    before: fmtFragment(d.before),
+    after: fmtFragment(d.after),
+    verdict: d.breaking ? '破坏性' : (d.needsConfirm ? '需人工确认' : '非破坏'),
+    isBreak: !!d.breaking,
+    isConfirm: !d.breaking && !!d.needsConfirm,
+    rule,
+    ruleZh: zh,
+    ruleTip: rule && zh !== rule ? `${rule}｜${ruleDesc(rule)}` : rule
+  }
+}))
 </script>
 
 <template>
@@ -111,7 +122,8 @@ const rows = computed(() => (props.diff || []).map(d => ({
         <td class="mono frag">{{ r.after }}</td>
         <td>
           <span :class="{'ver-break': r.isBreak, 'ver-confirm': r.isConfirm}">{{ r.verdict }}</span>
-          <span v-if="r.rule" class="rule mono" :title="r.rule">{{ r.rule }}</span>
+          <!-- rule：列内显示中文短语，title 悬出「原始 id｜一句话说明」（id 不丢，AC1） -->
+          <span v-if="r.rule" class="rule mono" :title="r.ruleTip">{{ r.ruleZh }}</span>
         </td>
       </tr>
       </tbody>

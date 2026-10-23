@@ -32,6 +32,7 @@
 import {computed, ref, watch} from 'vue'
 import {useMessage} from 'naive-ui'
 import {GetApiEntry, SaveApiEntry, DeleteApiEntry, RestoreApiEntry} from '../../bindings/DevCraft/app.js'
+import {copyText as writeClipboard} from '../lib/clipboard' // 共用剪贴板 helper（双路降级，见 lib/clipboard.js）
 
 const props = defineProps({
   entry: {type: Object, default: null}
@@ -154,17 +155,23 @@ function codeLanguage(lang) {
 }
 
 // ---------------- 复制 ----------------
+/** 复制统一入口（薄包装，函数名与三个模板调用点保持不变）：
+ *  ① 空内容 → warning「没有可复制的内容」，与改造前逐字一致；
+ *  ② 写入走 lib/clipboard.js 的共用 copyText（现代 API → 老式降级双路）——
+ *    原来这里只有单路 navigator 直写，服务器模式 http 非安全上下文下点「复制路径」必失败；
+ *  ③ 成功 → success(tip || 默认文案)，tip 可选行为不变；两条路都不通 → error 提示，
+ *    文案与 ChatApp 块级复制对齐（helper 返回 boolean 不再抛异常，故不带 err 详情）。
+ *  组件层从此不再出现剪贴板原生 API 字面量（AC5）。 */
 async function copyText(text, tip) {
   const s = text == null ? '' : String(text)
   if (!s) {
     message.warning('没有可复制的内容')
     return
   }
-  try {
-    await navigator.clipboard.writeText(s)
+  if (await writeClipboard(s)) {
     message.success(tip || '已复制到剪贴板')
-  } catch (err) {
-    message.error('复制失败：' + String(err))
+  } else {
+    message.error('复制失败：当前环境剪贴板不可用')
   }
 }
 

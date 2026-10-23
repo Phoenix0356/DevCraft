@@ -295,7 +295,7 @@ async function removeDomain(d) {
 
 // ---------------- 顶部按钮 ----------------
 /** 导出规范：调 ExportApiDocSpec 拿全文（与 skill 内置文本字节一致，AC9），
- *  写剪贴板走共用 helper copyText（navigator.clipboard → execCommand 双路降级，
+ *  写剪贴板走共用 helper copyText（双路降级实现与说明见 lib/clipboard.js，
  *  与 ChatApp 代码块标题栏的「复制」同一实现，不留两份）；两条路都失败才降级为弹窗展示全文 */
 async function exportSpec() {
   exporting.value = true
