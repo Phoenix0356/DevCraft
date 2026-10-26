@@ -271,7 +271,7 @@ export function ListDeployFlows() {
 }
 
 /**
- * ListSessions 会话列表（按更新时间倒序）。前端：ListSessions()
+ * ListSessions 会话列表（置顶优先，组内按更新时间倒序）。前端：ListSessions()
  * @returns {$CancellablePromise<store$0.Session[]>}
  */
 export function ListSessions() {
@@ -447,6 +447,17 @@ export function SetAgentSkills(id, skillNames) {
  */
 export function SetSessionAgent(sessionID, agentID) {
     return $Call.ByID(1149337382, sessionID, agentID);
+}
+
+/**
+ * SetSessionPinned 置顶/取消置顶会话（列表排序与分组由后端决定）。
+ * 前端：SetSessionPinned(sessionID, pinned)
+ * @param {string} sessionID
+ * @param {boolean} pinned
+ * @returns {$CancellablePromise<void>}
+ */
+export function SetSessionPinned(sessionID, pinned) {
+    return $Call.ByID(3777593615, sessionID, pinned);
 }
 
 /**

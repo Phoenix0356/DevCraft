@@ -362,7 +362,7 @@ func (s *Service) TestLLM(ctx context.Context) error {
 
 // ==================== 会话 ====================
 
-// ListSessions 会话列表（按活跃时间倒序）。
+// ListSessions 会话列表（置顶优先；置顶组内按置顶时间倒序，其余按最后活跃时间倒序）。
 func (s *Service) ListSessions() ([]store.Session, error) { return s.store.ListSessions() }
 
 // NewSession 建会话，默认绑定内置运维 Agent。
@@ -390,6 +390,30 @@ func (s *Service) SetSessionAgent(sessionID, agentID string) error {
 	}
 	_, err = s.store.SetSessionAgentID(sess.ID, agentID)
 	return err
+}
+
+// SetSessionPinned 置顶/取消置顶会话（前端 📌 按钮）。
+// 显式布尔、幂等：不做 toggle，前端传目标态。bool→0/1 的转换只在这一层做，
+// store 只认整数（列是 INTEGER，仓库布尔惯例）。定向写：不触碰标题与 Agent 绑定。
+// 置顶时间（pinned_at）由 store 从 pinned 单点派生，本层既不传也不读时间戳。
+func (s *Service) SetSessionPinned(sessionID string, pinned bool) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return fmt.Errorf("会话 id 不能为空")
+	}
+	v := 0
+	if pinned {
+		v = 1
+	}
+	wrote, err := s.store.SetSessionPinned(sessionID, v)
+	if err != nil {
+		return err
+	}
+	if !wrote {
+		return fmt.Errorf("会话不存在或已被删除")
+	}
+	slog.Info("会话置顶状态已更新", "session", sessionID, "pinned", pinned)
+	return nil
 }
 
 // Messages 会话全部历史（前端打开会话时加载）。

@@ -17,7 +17,7 @@ func countColumn(cols []string, name string) int {
 	return n
 }
 
-// TestMigrateIdempotentOnFreshDB 全新库：建表语句已带 title_source，
+// TestMigrateIdempotentOnFreshDB 全新库：建表语句已带 title_source 与 pinned，
 // 反复 Open（每次启动都会跑一遍 migrate）必须不报错，且列只有一条。
 func TestMigrateIdempotentOnFreshDB(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
@@ -51,12 +51,18 @@ func TestMigrateIdempotentOnFreshDB(t *testing.T) {
 	if n := countColumn(cols, "title_source"); n != 1 {
 		t.Fatalf("title_source 列出现 %d 次，want 1（cols=%v）", n, cols)
 	}
+	if n := countColumn(cols, "pinned"); n != 1 {
+		t.Fatalf("pinned 列出现 %d 次，want 1（cols=%v）", n, cols)
+	}
 	got, err := st2.GetSession("s1")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if got.TitleSource != "" {
 		t.Fatalf("新建会话的 title_source = %q，want 空串（占位态）", got.TitleSource)
+	}
+	if got.Pinned != 0 {
+		t.Fatalf("新建会话的 pinned = %d，want 0（不置顶态）", got.Pinned)
 	}
 }
 
@@ -104,12 +110,20 @@ VALUES ('old', '旧会话', 'ops', 'manual', 1, 1);
 	if n := countColumn(cols, "title_source"); n != 1 {
 		t.Fatalf("title_source 列出现 %d 次，want 1（cols=%v）", n, cols)
 	}
+	// 这张表有 title_source 但没有 pinned —— 正是"上一版已上线"的真实用户库形态：
+	// 缺的那一列照样要补上，已有的那一列绝不重复添加。
+	if n := countColumn(cols, "pinned"); n != 1 {
+		t.Fatalf("pinned 列出现 %d 次，want 1（cols=%v）", n, cols)
+	}
 	got, err := st.GetSession("old")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if got.TitleSource != TitleSourceManual {
 		t.Fatalf("旧行的 title_source = %q，want manual（迁移不该动数据）", got.TitleSource)
+	}
+	if got.Pinned != 0 {
+		t.Fatalf("旧行的 pinned = %d，want 0（DEFAULT 落位）", got.Pinned)
 	}
 }
 
@@ -244,12 +258,12 @@ func TestSessionTargetedWrites(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	// 切 Agent：标题/来源零变化
+	// 切 Agent：标题/来源/置顶零变化
 	if wrote, err := st.SetSessionAgentID("s1", "bare"); err != nil || !wrote {
 		t.Fatalf("SetSessionAgentID = (%v, %v)", wrote, err)
 	}
 	got, _ := st.GetSession("s1")
-	if got.AgentID != "bare" || got.Title != "新会话" || got.TitleSource != "" {
+	if got.AgentID != "bare" || got.Title != "新会话" || got.TitleSource != "" || got.Pinned != 0 {
 		t.Fatalf("切 Agent 后 = %+v", got)
 	}
 

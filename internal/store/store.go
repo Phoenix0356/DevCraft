@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS sessions (          -- 会话表：一个会话绑定
 	title      TEXT NOT NULL DEFAULT '',
 	agent_id   TEXT NOT NULL DEFAULT '',
 	title_source TEXT NOT NULL DEFAULT '',       -- 标题来源：''=首条消息截断占位 | 'ai'=AI 总结 | 'manual'=手动改名（锁定，AI 永不再覆盖）
+	pinned       INTEGER NOT NULL DEFAULT 0,      -- 置顶标记：0 普通会话 | 1 置顶（列表排序前置，侧栏分组依据）
+	pinned_at    INTEGER NOT NULL DEFAULT 0,      -- 置顶时间毫秒；0 = 未置顶（置顶组内倒序的依据，与 pinned 同步落位）
 	created_at INTEGER NOT NULL,                 -- 毫秒时间戳（SQLite 无日期类型，惯例存整数）
 	updated_at INTEGER NOT NULL
 );
@@ -253,8 +255,16 @@ CREATE INDEX IF NOT EXISTS idx_api_batch_scope ON api_import_batches(scope_ident
 // 每一步都必须失败可感知：迁移失败会一路返回到 Open，让启动阶段直接暴露问题，
 // 绝不静默跳过（列缺失会让后面的读写全部报错，静默只会把故障推迟到更难定位的地方）。
 func ensureColumns(db *sql.DB) error {
-	return ensureSessionColumn(db, "title_source",
-		`ALTER TABLE sessions ADD COLUMN title_source TEXT NOT NULL DEFAULT ''`)
+	if err := ensureSessionColumn(db, "title_source",
+		`ALTER TABLE sessions ADD COLUMN title_source TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureSessionColumn(db, "pinned",
+		`ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	return ensureSessionColumn(db, "pinned_at",
+		`ALTER TABLE sessions ADD COLUMN pinned_at INTEGER NOT NULL DEFAULT 0`)
 }
 
 // sessionsTableInfoSQL 查 sessions 表结构。表名在本包内写死成常量，不接任何外部输入
@@ -336,6 +346,8 @@ type Session struct {
 	Title       string `json:"title"`
 	AgentID     string `json:"agentId"`
 	TitleSource string `json:"titleSource"` // 空串=首条消息截断占位 | 'ai' | 'manual'（见标题来源常量）
+	Pinned      int    `json:"pinned"`      // 0 普通 | 1 置顶（SQLite 无 boolean，沿用本仓库 0/1 惯例）
+	PinnedAt    int64  `json:"pinnedAt"`    // 置顶时间毫秒；0 = 未置顶（与 Pinned 同步变更，见 SetSessionPinned）
 	CreatedAt   int64  `json:"createdAt"`
 	UpdatedAt   int64  `json:"updatedAt"`
 }
@@ -349,6 +361,7 @@ const (
 // CreateSession 插入新会话。
 // title_source 不在 INSERT 列里：新建会话必然是占位态（空串），由列 DEFAULT 落位，
 // 不给调用方"带着别的来源创建"的机会（状态只能靠下面的定向写入推进）。
+// pinned / pinned_at 同理：新建会话必然不置顶，由列 DEFAULT 落位，置顶只能走 SetSessionPinned。
 func (s *Store) CreateSession(sess Session) error {
 	now := time.Now().UnixMilli() // 毫秒时间戳
 	if sess.CreatedAt == 0 {
@@ -362,9 +375,11 @@ func (s *Store) CreateSession(sess Session) error {
 	return err
 }
 
-// ListSessions 按最后活跃时间倒序返回全部会话。
+// ListSessions 置顶会话整体在前，置顶组内按置顶时间倒序（刚钉住的排最前），
+// 其余会话按最后活跃时间倒序（未置顶的 pinned_at 恒为 0，并列无效）。
+// 排序只有这一个来源：前端从不本地排序，拿到什么顺序就渲染什么顺序。
 func (s *Store) ListSessions() ([]Session, error) {
-	rows, err := s.db.Query(`SELECT id, title, agent_id, title_source, created_at, updated_at FROM sessions ORDER BY updated_at DESC`)
+	rows, err := s.db.Query(`SELECT id, title, agent_id, title_source, pinned, pinned_at, created_at, updated_at FROM sessions ORDER BY pinned DESC, pinned_at DESC, updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +388,7 @@ func (s *Store) ListSessions() ([]Session, error) {
 	for rows.Next() {  // 逐行迭代（≈ ResultSet.next()）
 		var sess Session
 		// Scan 把当前行各列按顺序读入变量（列顺序必须与 SELECT 一致）
-		if err := rows.Scan(&sess.ID, &sess.Title, &sess.AgentID, &sess.TitleSource, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+		if err := rows.Scan(&sess.ID, &sess.Title, &sess.AgentID, &sess.TitleSource, &sess.Pinned, &sess.PinnedAt, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
 			return nil, err // & 取地址：Scan 需要指针才能写入（≈ 传引用）
 		}
 		out = append(out, sess)
@@ -385,8 +400,8 @@ func (s *Store) ListSessions() ([]Session, error) {
 func (s *Store) GetSession(id string) (Session, error) {
 	var sess Session
 	// QueryRow 用于"最多一行"的查询，Scan 时若没数据会得到哨兵错误 sql.ErrNoRows
-	err := s.db.QueryRow(`SELECT id, title, agent_id, title_source, created_at, updated_at FROM sessions WHERE id = ?`, id).
-		Scan(&sess.ID, &sess.Title, &sess.AgentID, &sess.TitleSource, &sess.CreatedAt, &sess.UpdatedAt)
+	err := s.db.QueryRow(`SELECT id, title, agent_id, title_source, pinned, pinned_at, created_at, updated_at FROM sessions WHERE id = ?`, id).
+		Scan(&sess.ID, &sess.Title, &sess.AgentID, &sess.TitleSource, &sess.Pinned, &sess.PinnedAt, &sess.CreatedAt, &sess.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return sess, fmt.Errorf("session %s not found", id)
 	}
@@ -455,6 +470,29 @@ func (s *Store) SetSessionFallbackTitle(id, title string) (bool, error) {
 func (s *Store) SetSessionAgentID(id, agentID string) (bool, error) {
 	res, err := s.db.Exec(`UPDATE sessions SET agent_id = ?, updated_at = ? WHERE id = ?`,
 		agentID, time.Now().UnixMilli(), id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// SetSessionPinned 只改置顶标记（不触碰标题、来源与 Agent 绑定）。
+// 这是写 pinned 的唯一入口：0/1 由调用方决定，本方法不做 toggle。
+// 刻意不刷 updated_at：置顶不是「活跃」，刷了会让取消置顶的老会话跳到最近组顶部，
+// 回到的是它该有的历史位置而不是列表最前。
+// pinned_at（置顶时间，置顶组内倒序的依据）由 pinned 在本函数内部派生，刻意不接参数：
+// pinned=1 ⇔ pinned_at>0 这个不变量必须由写 pinned 的这一个点守住——一旦让调用方
+// 分别赋值，两边就能写劈（标了置顶却排不出顺序，或取消置顶却留着旧时间戳）。
+func (s *Store) SetSessionPinned(id string, pinned int) (bool, error) {
+	pinnedAt := int64(0) // 取消置顶归零：未置顶的行不参与 pinned_at 排序
+	if pinned == 1 {
+		pinnedAt = time.Now().UnixMilli()
+	}
+	res, err := s.db.Exec(`UPDATE sessions SET pinned = ?, pinned_at = ? WHERE id = ?`, pinned, pinnedAt, id)
 	if err != nil {
 		return false, err
 	}

@@ -202,7 +202,7 @@ func (a *App) NewSession() (store.Session, error) {
 	return svc.NewSession()
 }
 
-// ListSessions 会话列表（按更新时间倒序）。前端：ListSessions()
+// ListSessions 会话列表（置顶优先，组内按更新时间倒序）。前端：ListSessions()
 func (a *App) ListSessions() ([]store.Session, error) {
 	svc, err := a.svcOrErr()
 	if err != nil {
@@ -237,6 +237,16 @@ func (a *App) RenameSession(id, title string) error {
 		return err
 	}
 	return svc.RenameSession(id, title)
+}
+
+// SetSessionPinned 置顶/取消置顶会话（列表排序与分组由后端决定）。
+// 前端：SetSessionPinned(sessionID, pinned)
+func (a *App) SetSessionPinned(sessionID string, pinned bool) error {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return err
+	}
+	return svc.SetSessionPinned(sessionID, pinned)
 }
 
 // GetMessages 取会话历史消息。前端：GetMessages(sessionID)

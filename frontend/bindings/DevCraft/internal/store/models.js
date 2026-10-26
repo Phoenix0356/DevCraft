@@ -1377,6 +1377,22 @@ export class Session {
              */
             this["titleSource"] = "";
         }
+        if (!("pinned" in $$source)) {
+            /**
+             * 0 普通 | 1 置顶（SQLite 无 boolean，沿用本仓库 0/1 惯例）
+             * @member
+             * @type {number}
+             */
+            this["pinned"] = 0;
+        }
+        if (!("pinnedAt" in $$source)) {
+            /**
+             * 置顶时间毫秒；0 = 未置顶（与 Pinned 同步变更，见 SetSessionPinned）
+             * @member
+             * @type {number}
+             */
+            this["pinnedAt"] = 0;
+        }
         if (!("createdAt" in $$source)) {
             /**
              * @member
