@@ -36,7 +36,7 @@ import {
   SendMessage, CancelTurn, ListAgents, ListAgentsDetail, ApproveDeployment, RejectDeployment,
   ApproveApiDocImport, RejectApiDocImport,
   PreviewApiDocImport, CommitApiDocImport,
-  RenameSession
+  RenameSession, SetSessionPinned
 } from '../../bindings/DevCraft/app.js'
 
 import {renderMarkdown} from '../lib/markdown'      // Markdown → HTML
@@ -804,6 +804,47 @@ function onEnterOrSend(e) {
   send()
 }
 
+// ---------------- 侧栏分组与布局 ----------------
+
+/** 置顶组 / 最近组。排序（置顶优先 + 组内 updated_at 倒序）唯一来源是后端 ListSessions
+ *  的 ORDER BY，前端只按 pinned 切组、不再排第二次序——两处规则一分叉，条目就会在
+ *  用户眼前换位。判断写成 === 1 / !== 1：pinned 是 0/1 整型，字段缺失的老数据自动归最近组 */
+const pinnedSessions = computed(() => sessions.value.filter(s => s.pinned === 1))
+const recentSessions = computed(() => sessions.value.filter(s => s.pinned !== 1))
+
+/** 侧栏的一维渲染序列：组标题（哨兵项）与会话项混排。两个分组走同一个 v-for，
+ *  条目模板（改名输入框 + hover 操作组）只有一份，不会一处改了另一处漏改。
+ *  空组的标题不进序列（所以没有置顶会话时只剩「最近会话」一个标题）；
+ *  哨兵 key 加 g- 前缀，与会话 id 不可能撞 key */
+const sessionRows = computed(() => {
+  const rows = []
+  if (pinnedSessions.value.length) rows.push({kind: 'group', id: 'g-pinned', label: '已置顶'})
+  for (const s of pinnedSessions.value) rows.push({kind: 'session', id: s.id, s})
+  if (recentSessions.value.length) rows.push({kind: 'group', id: 'g-recent', label: '最近会话'})
+  for (const s of recentSessions.value) rows.push({kind: 'session', id: s.id, s})
+  return rows
+})
+
+/** 侧栏三段布局真正的 flex 父容器（根因修复）。
+ *  sider-head / session-list / sider-foot 不是 <aside> 的直接子节点：naive-ui 的
+ *  n-layout-sider 默认 native-scrollbar=true，children 被包进 .n-layout-sider-scroll-container
+ *  那层自带 overflow:auto 的滚动容器，挂在 class="sider" 上的 flex 管不到它们——
+ *  原先 .session-list{flex:1} 因此空转，列表高度=内容总高，会话一多就把底部四个入口
+ *  顶出视口（侧栏同时长出它自己的滚动条）。
+ *  :content-style 正是透传到那层容器，且排在 naive-ui 自己的 {overflow:auto} 之后；
+ *  用 inline 而非 :deep() 规则是因为 naive-ui 样式是运行时注入的 <style>，同特异度会赢。
+ *  高度取 100%（不是 min-height）：那层本身是滚动容器，内容总高必须≤侧栏高度。
+ *  正常视口下唯一的滚动容器是会话列表；但 .session-list 是 33vh 固定带、三段又都是
+ *  flex:0 0 *（谁都不肯收缩），所以很矮的视口下 head+33vh+foot 的总高会超过侧栏高度，
+ *  此时外层那层 overflow:auto 出条，人仍能滚到四个入口——取舍是宁可多一条滚动条，
+ *  也不能把入口按钮裁没 */
+const siderContentStyle = {
+  display: 'flex',
+  flexDirection: 'column',
+  height: '100%',
+  boxSizing: 'border-box'
+}
+
 // ---------------- 会话操作 ----------------
 
 /** 新建会话并立即打开 */
@@ -852,6 +893,21 @@ async function removeSession(sess) {
     messages.value = []
   }
   await loadSessions(true)
+}
+
+/** 📌 置顶 / 取消置顶。显式传目标态（幂等），成功后整体重拉列表——位置由后端排好，
+ *  取消置顶的会话回到它自己的 updated_at 位置（置顶不等于活跃，后端不会为此刷新时间戳）。
+ *  重拉只换 sessions 数组：高亮按 currentSession.id 比对、消息区与滚动状态都不经过这里，
+ *  所以钉住当前会话不会把正在看的内容清掉。
+ *  @click.stop 由模板负责：条目本身可点击进会话，按钮不能再冒泡一次 */
+async function togglePin(s) {
+  try {
+    await SetSessionPinned(s.id, s.pinned !== 1)
+  } catch (err) {
+    message.error(String(err))   // 后端中文错误（如"会话不存在或已被删除"）直接展示
+    return                        // 写库失败不重拉：列表留在与后端一致的样子，用户再点一次
+  }
+  await loadSessions(false)
 }
 
 // ---------------- 会话标题：行内改名 ----------------
@@ -1111,45 +1167,55 @@ watch(view, (v, oldV) => {
 
     <!-- ============ 左侧：会话侧边栏 ============ -->
     <!-- 280px：16:9 宽屏下稍宽，容纳更长的会话标题；主区 flex 自适应剩余宽度 -->
-    <n-layout-sider bordered :width="280" class="sider">
+    <n-layout-sider bordered :width="280" :content-style="siderContentStyle" class="sider">
       <div class="sider-head">
         <div class="brand">DevCraft</div>
         <n-button size="small" type="primary" ghost block @click="createSession">+ 新会话</n-button>
         <!-- @click 是 v-on:click 的缩写：绑定点击事件 -->
       </div>
 
-      <!-- 会话列表：v-for 循环渲染（≈ for-each），:key 帮 Vue 识别每项身份。
+      <!-- 会话列表：一个 v-for 走到底（序列见 sessionRows），组标题是序列里的哨兵项。
+           v-for 循环渲染（≈ for-each），:key 帮 Vue 识别每项身份；
            :class 绑定对象语法：active 类在条件为真时生效 -->
       <div class="session-list">
-        <div
-          v-for="s in sessions" :key="s.id"
-          class="session-item"
-          :class="{active: currentSession?.id === s.id}"
-          @click="selectSession(s)"
-        >
-          <!-- 行内改名：editingId 命中时标题变输入框（Enter/失焦保存、Esc 取消）。
-               v-auto-focus 挂载后自动聚焦全选；@click.stop 防止冒泡触发 selectSession -->
-          <n-input
-            v-if="editingId === s.id"
-            v-model:value="editingText"
-            v-auto-focus
-            size="tiny"
-            class="session-edit"
-            @click.stop
-            @keydown.enter="onRenameEnter(s, $event)"
-            @keyup.esc="cancelRename"
-            @blur="commitRename(s)"
-          />
-          <span v-else class="session-title">{{ s.title || '新会话' }}</span>
-          <!-- {{ }} 双花括号 = 文本插值（≈ 模板引擎的 ${}），自动 HTML 转义 -->
+        <template v-for="row in sessionRows" :key="row.id">
+          <div v-if="row.kind === 'group'" class="group-title">{{ row.label }}</div>
+          <div
+            v-else
+            class="session-item"
+            :class="{active: currentSession?.id === row.s.id}"
+            @click="selectSession(row.s)"
+          >
+            <!-- 行内改名：editingId 命中时标题变输入框（Enter/失焦保存、Esc 取消）。
+                 v-auto-focus 挂载后自动聚焦全选；@click.stop 防止冒泡触发 selectSession -->
+            <n-input
+              v-if="editingId === row.s.id"
+              v-model:value="editingText"
+              v-auto-focus
+              size="tiny"
+              class="session-edit"
+              @click.stop
+              @keydown.enter="onRenameEnter(row.s, $event)"
+              @keyup.esc="cancelRename"
+              @blur="commitRename(row.s)"
+            />
+            <!-- 置顶标记常驻在标题左侧：opacity 明显低于 hover 操作组，只作状态确认不抢视觉。
+                 {{ }} 双花括号 = 文本插值（≈ 模板引擎的 ${}），自动 HTML 转义 -->
+            <span v-else class="session-title"><span v-if="row.s.pinned === 1" class="pin-mark">📌</span>{{ row.s.title || '新会话' }}</span>
 
-          <!-- 悬停操作组（不挤占标题布局）：✏️ 改名 / ✕ 删除。
-               .stop 阻止冒泡到 selectSession -->
-          <span v-if="editingId !== s.id" class="session-actions">
-            <n-button quaternary size="tiny" class="session-act" title="重命名" @click.stop="startRename(s)">✏️</n-button>
-            <n-button quaternary size="tiny" class="session-del" title="删除会话" @click.stop="removeSession(s)">✕</n-button>
-          </span>
-        </div>
+            <!-- 悬停操作组（不挤占标题布局）：✏️ 改名 / 📌 置顶 / ✕ 删除。
+                 .stop 阻止冒泡到 selectSession -->
+            <span v-if="editingId !== row.s.id" class="session-actions">
+              <n-button quaternary size="tiny" class="session-act" title="重命名" @click.stop="startRename(row.s)">✏️</n-button>
+              <n-button
+                quaternary size="tiny" class="session-act"
+                :title="row.s.pinned === 1 ? '取消置顶' : '置顶'"
+                @click.stop="togglePin(row.s)"
+              >📌</n-button>
+              <n-button quaternary size="tiny" class="session-del" title="删除会话" @click.stop="removeSession(row.s)">✕</n-button>
+            </span>
+          </div>
+        </template>
         <!-- v-if：条件渲染，列表为空时显示占位提示 -->
         <n-empty v-if="sessions.length === 0" description="暂无会话" size="small" class="empty"/>
       </div>
@@ -1602,27 +1668,47 @@ watch(view, (v, oldV) => {
    .main 显式 height + flex:1：右侧视图吃掉侧边栏之外的全部剩余宽/高 */
 .app-layout { display: flex; width: 100%; height: 100vh; }
 .main { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; }
+/* .sider 的 flex 只作用在 <aside> 的直接子节点（naive-ui 那层滚动容器）上，
+   三段内容的 flex 父容器由 :content-style 指定，见脚本里 siderContentStyle 的注释 */
 .sider { display: flex; flex-direction: column; }
-.sider-head { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.sider-head { padding: 12px; display: flex; flex-direction: column; gap: 8px; flex: 0 0 auto; }
 .brand { font-weight: 700; font-size: 16px; letter-spacing: 1px; }
-.session-list { flex: 1; overflow-y: auto; padding: 4px 8px; }
+/* 会话列表占上 1/3（33vh 固定带）：左栏后续要放其他工具入口，对话区必须让出这块
+   空间，不是"顺手加个滚动条"。用固定带（flex: 0 0 33vh）而不是 max-height：入口区的
+   位置必须与会话数量解耦——max-height 下条目少时整条带会塌陷，把紧随其后的入口按钮
+   一起拽到侧栏上沿。所以列表预留一条带：条目少时空档落在这条带内部（预期行为，
+   不做补偿），列里剩下的自由空间落在列的末尾（.sider-foot 之后） */
+.session-list { flex: 0 0 33vh; overflow-y: auto; padding: 4px 8px; }
 .session-item {
   display: flex; align-items: center; justify-content: space-between;
   padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
 }
 .session-item:hover { background: rgba(255,255,255,0.06); }
 .session-item.active { background: rgba(99,226,183,0.15); }
+/* 组标题（已置顶 / 最近会话）：小字 + 低对比 + 尾部一道分隔线，压在 .brand / .sider-head
+   的暗色基调上，只当分区记号不当内容。两组共用一个滚动容器，标题跟着条目一起滚（D4），
+   所以不做 sticky；空组不进渲染序列，标题也就不会出现（D5） */
+.group-title {
+  display: flex; align-items: center; gap: 8px;
+  margin: 10px 2px 4px; font-size: 11px; letter-spacing: 1px;
+  color: rgba(255,255,255,0.35);
+}
+.group-title::after { content: ''; flex: 1; height: 1px; background: rgba(255,255,255,0.08); }
 /* 标题占据剩余宽度并可截断（min-width:0 是 flex 子项省略号生效的关键） */
 .session-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 置顶常驻标记：内联在标题文字前、跟着一起截断；透明度低于 hover 操作组（0.45 vs 1），
+   只做"这条被钉住了"的确认，不与操作按钮抢视觉 */
+.pin-mark { opacity: 0.45; margin-right: 4px; }
 /* 行内改名输入框：撑满标题原本的宽度 */
 .session-edit { flex: 1; min-width: 0; }
-/* 悬停操作组（✏️/✕）：默认隐藏，hover 才显现，不挤占标题布局 */
+/* 悬停操作组（✏️/📌/✕）：默认隐藏，hover 才显现，不挤占标题布局 */
 .session-actions { display: flex; align-items: center; gap: 2px; margin-left: 6px; opacity: 0; }
 .session-item:hover .session-actions { opacity: 1; }
 .session-act, .session-del { padding: 0 2px; } /* tiny 图标按钮收紧内边距，并排不溢出 */
 .sider-foot {
   padding: 8px 12px; border-top: 1px solid rgba(255,255,255,0.08);
   display: flex; flex-direction: column; gap: 2px; /* 设置 / 技能 / 智能体 / 接口文档四个入口按钮纵向堆叠 */
+  flex: 0 0 auto;
 }
 /* 入口按钮对齐：n-button 默认内容居中——撑满其内部 __content 容器后，
    用"固定宽度图标列 + 左对齐文字列"的 flex 行实现三按钮图标/文字各自纵向成列。
@@ -1782,8 +1868,12 @@ watch(view, (v, oldV) => {
   border-radius: 0 0 6px 6px; /* 跟着 pre 的 6px 圆角收口，遮罩方角不戳出卡片 */
 }
 /* 滚动条收窄（仓库此前无任何滚动条样式）：Windows 经典滚动条宽 17px，会实打实吃掉
-   内容宽度，配合上面的横向溢出就表现为"页面被往左拽、右侧露出一条空面板"。 */
+   内容宽度，配合上面的横向溢出就表现为"页面被往左拽、右侧露出一条空面板"。
+   统一约定：8px 槽、thumb rgba(255,255,255,0.18)、圆角 4px、透明轨道。
+   槽位常驻而不是 hover 时才 display:none → block：CSS 里滚动条宽度算进布局，
+   滑块随鼠标进出出现/消失会让内容左右横跳（会话列表行内按钮尤其明显）。 */
 .chat-list::-webkit-scrollbar,
+.session-list::-webkit-scrollbar,
 .msg-body :deep(pre)::-webkit-scrollbar,
 .msg-body :deep(table)::-webkit-scrollbar { width: 8px; height: 8px; }
 .chat-list::-webkit-scrollbar-thumb,
@@ -1791,7 +1881,12 @@ watch(view, (v, oldV) => {
 .msg-body :deep(table)::-webkit-scrollbar-thumb {
   background: rgba(255,255,255,0.18); border-radius: 4px;
 }
+/* 会话列表侧栏常驻，静态滑块在暗色面板里太吵 → 槽位留着、thumb 平时透明，
+   鼠标移到列表上才按同一套约定上色（值与上面共用规则里的 thumb 完全一致） */
+.session-list::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
+.session-list:hover::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); }
 .chat-list::-webkit-scrollbar-track,
+.session-list::-webkit-scrollbar-track,
 .msg-body :deep(pre)::-webkit-scrollbar-track,
 .msg-body :deep(table)::-webkit-scrollbar-track { background: transparent; }
 .msg-tools { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
