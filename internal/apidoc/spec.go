@@ -132,6 +132,13 @@ version_tag: REQ-1024
 * 参数名同表重复 → E-PARAM-DUP；数据行列数与表头不符 → E-PARAM-ROW-COLS。
 * 交叉引用写法在规范模式一律拒收：「同新增订阅。」「元素结构见 7.1」→ E-CROSS-REF，必须原样展开参数表。
   理由：不展开则字段表为空，重复导入时「空 vs 空」永远判未变化，真实改动被静默吞掉（比误报更危险）。
+* 参数小节三态判定（请求参数/路径参数/返回参数）：有表 = 解析入库；写明「无。」（含「无请求体。」等
+  以「无」开头的说明）= 明确无参数；小节存在但空、或引用式/无法识别的散文 = 信息缺失 → Unresolved、
+  parse_state=partial。**唯一豁免**：「请求参数」小节**整体缺失**按无请求参数处理（parse_state=ok、
+  不进 Unresolved），导入报告发 W-REQ-SECTION-ABSENT（init/incremental 都发、每接口一条、不阻断）——
+  无 Query/Body/Header 参数的接口省略该小节不再被持久标记 partial；如有参数请补写小节，
+  下次导入补上参数表时 diff 会检出 added，声明「未变更」会被 E-DIFF-MISMATCH-UNCHANGED 阻断。
+  路径含 {} 却缺路径参数表、缺返回参数表**不豁免**，照旧 Unresolved/partial。
 * 命名结构子表（**SubscriptionVO 结构**： 这种粗体标题 + 表）：作为命名结构入库，
   主键 (name, owner_scope)，owner_scope = 宿主接口或文档级。同名不同构 → 标记 ambiguous
   并拒绝按名自动展开，只报 W-STRUCT-DIVERGED。
@@ -139,7 +146,11 @@ version_tag: REQ-1024
 ### 3.3 示例与 curl
 
 * 原文保存、永不结构化、不参与变更判定——只改示例/curl/中文说明不算接口变更（防「文档润色」刷屏假事件）。
-* 示例块会尝试 JSON 校验：失败 → W-EXAMPLE-JSON（可能是 multipart 原始报文或请求行示例，属正常，预览确认即可）。
+* 示例块会尝试 JSON 校验：失败 → W-EXAMPLE-JSON。但两类「本就不是 JSON」的示例已排除、不告警：
+  ① multipart 原始报文（无语言标记且含 Content-Disposition:/multipart/form-data，归类为 multipart_raw）；
+  ② 请求行示例（首个非空行形如 GET /path …，方法大小写敏感、须大写）——剥掉请求行及其后连续「头形态」行（Field: value），
+  遇空行（标准头/body 分隔）或首个非头行（如无空行分隔时直接以 { 开头的 JSON body）即收口，剩余非空 body 才校验，
+  纯请求行/纯头不告警，「请求行 + JSON body」的混合示例（无论有无空行分隔）仍校验 body（body 非法照样 W-EXAMPLE-JSON）。
 * curl 里的 method/path 与 **URL** 行不一致 → W-CURL-MISMATCH。
 * curl 是优秀的校验源，但绝不能当身份源：占位符在 curl 里被替换成了实例值（…/subscription/1002）。
 
@@ -174,6 +185,10 @@ normPath 只做两件事：
 
 * 判定用结构规则、不用标题字符串黑名单：该 ## 之下存在至少一个带 **URL** bullet 的 ### → 是领域；
   否则是非接口章节（概述 / 错误响应 / 接口汇总 / 结构说明会被自动排除）。
+* 无 URL 行的 ### 块按所在章节是否领域分级（裁决在领域分类之后，沿用同一套结构规则）：
+  领域章节内的接口块缺 URL → E-URL-FORMAT（真接口缺 URL 必须阻断，防静默丢接口）；
+  非领域章节（变更总览 / 前端对接清单 / 概述等）的 ### 摘要块 → W-UNPARSED-BLOCK（保留原文、不阻断）。
+  E-URL-FORMAT 的「缺 URL 阻断」仅适用于领域章节内的接口块；init 模式一律只 W 不阻断。
 * 领域名归一顺序（不可颠倒）：
   1. 剥中文/阿拉伯序号前缀（一、 十二、 1.）；
   2. 剥尾部括号限定语并转 flag：（内部）→ visibility=internal——必须先走这步，否则下一步剥不掉尾部「接口」；
@@ -257,7 +272,7 @@ Issue{ level: "E"|"W", code, line, snippet, want, hint } ——行号必给（ch
 | E-SPEC-BLOCK-MISSING / E-SPEC-VERSION / E-SCOPE-FULL-NOT-SUPPORTED | meta 块缺失 / 版本不支持 / full 模式未实现 |
 | E-META-FIELD-MISSING / E-META-ENUM / E-META-UNKNOWN-KEY | meta 字段 |
 | E-ENDPOINT-NO-DOMAIN / E-ENDPOINT-DUP | 接口块不在 ## 下 / 同文档内 key 重复 |
-| E-URL-FORMAT / E-METHOD-INVALID | URL 行 |
+| E-URL-FORMAT / E-METHOD-INVALID | URL 行（无 URL 的 ### 仅领域章节内报 E-URL-FORMAT；非领域章节降 W-UNPARSED-BLOCK，见 §5） |
 | E-CHANGE-MISSING / E-CHANGE-ENUM / E-CHANGEPOINT-MISSING | 变更声明 |
 | E-PARAM-COL-UNKNOWN / E-PARAM-ROW-COLS / E-PARAM-DUP / E-POS-COL-MISSING | 参数表 |
 | E-CROSS-REF | 引用式写法（「同新增订阅。」） |
@@ -265,9 +280,11 @@ Issue{ level: "E"|"W", code, line, snippet, want, hint } ——行号必给（ch
 | E-DIFF-MISMATCH-ADDED / -UPDATED / -UNCHANGED | 声明集合 vs 程序 diff 集合不一致（逐项列两边结果） |
 | E-BREAKING-DENIED | 文档声明 breaking: false 但启发式判破坏 |
 | W-BASEPATH-ASSERT-FAIL / W-EXAMPLE-JSON / W-CURL-MISMATCH / W-STRUCT-DIVERGED / W-POS-INFERRED / W-EMPTY-DOMAIN / W-UNKNOWN-SECTION / W-UNPARSED-BLOCK / W-SUMMARY-DIVERGED | 警告 |
+| W-REQ-SECTION-ABSENT | 「请求参数」小节整体缺失，已按无请求参数处理（见 §3.2 三态判定；不进 Unresolved、不阻断，init/incremental 都发） |
 
 降级三件套（「不许猜」的落地位）：① 结构化 Issue 列表；② 条目级 parse_state = ok|partial|unparsed
 + Unresolved 槽位（记「哪个槽位没解析出来」，不是整条丢掉）；③ raw_markdown 原文切片。
+例外：请求参数小节整体缺失按无参数处理（§3.2），只留 W-REQ-SECTION-ABSENT 一次性提示，不持久标记 partial。
 文档自身的 bug（定义与示例不一致、类型混用）在导入报告里与变更事件分栏。
 
 完整性自检（报告用，不作删除依据）：C1 汇总闭合——正文 URL 集 vs 末尾「接口汇总」表
@@ -361,5 +378,7 @@ curl -X GET http://localhost:8080/api/v1/demo/users/1 \
 * 每个接口必须写 **变更**；修改/删除必须写 **变更点**；
 * 禁止「同新增订阅。」这类引用式写法，参数表必须原样展开；
 * 请求参数/路径参数表必须带「位置」列（Path/Query/Body/Header）；
+* 确无 Query/Body/Header 参数时可省略「#### 请求参数」小节（导入按无参数处理，仅提示 W-REQ-SECTION-ABSENT）；
+  有参数就必须写小节——路径占位符对应的路径参数表、返回参数表不可省略；
 * 不要为了「让校验通过」而删字段或改类型——校验器只读不改，写什么就入库什么。
 `

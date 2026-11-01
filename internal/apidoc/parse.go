@@ -132,7 +132,7 @@ type Example struct {
 type SectionState string
 
 const (
-	SectionAbsent   SectionState = "absent"    // 根本没有该 #### 小节 = 信息缺失（Unresolved）
+	SectionAbsent   SectionState = "absent"    // 根本没有该 #### 小节 = 信息缺失（Unresolved）；唯一例外：请求参数小节缺失按无参数处理（W-REQ-SECTION-ABSENT，见 classifyProse）
 	SectionEmpty    SectionState = "empty"     // 明确声明无参数（「无。」「无请求体。」等）
 	SectionTable    SectionState = "table"     // 有参数表
 	SectionCrossRef SectionState = "cross_ref" // 引用式写法（「同新增订阅。」），规范模式一律拒收
@@ -297,6 +297,13 @@ var (
 	reSeeRef     = regexp.MustCompile(`见\s*[0-9]+(?:\.[0-9]+)*`)
 	reCURLMethod = regexp.MustCompile(`(?:-X|--request)\s+([A-Za-z]+)`)
 	reCURLURL    = regexp.MustCompile(`https?://[^"'\s\\]+`)
+	// 请求行示例的首行形态：大写 HTTP 方法 + 空格 + 以 / 开头的路径（如 GET /api/v1.0/user?x=1）。
+	// 用于 stripRequestLine 识别「原始报文」式示例，剥掉请求行/头行后再校验 JSON body。
+	reRequestLine = regexp.MustCompile(`^(GET|POST|PUT|DELETE|PATCH) /`)
+	// HTTP 头行形态：`Field-Name: value`（字段名 = 字母开头 + 字母/数字/连字符，随后冒号）。
+	// stripRequestLine 据此区分「头行」与「body」：JSON body 首字符必为 { / [ / 引号 / 数字，
+	// 绝不匹配本形态，所以「请求行后无空行直接跟 JSON」时能在 body 首行收口、不把 body 当头吞掉。
+	reHeaderLine = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*[ \t]*:`)
 )
 
 // ===================== 解析器内部结构 =====================
@@ -375,6 +382,13 @@ type parser struct {
 	states   []blockState
 	tables   []*mdTable
 
+	// noURLCandidates 趟 3 收集的「无 URL 形态 bullet 的 ### 块」索引（按块序 = 行号序）。
+	// 这些块的 E/W 裁决推迟到 buildDomains 之后：报错时领域信息还没算出来（见 adjudicateNoURLBlocks）。
+	noURLCandidates []int
+	// chapterDomainIdx 与 chapters 平行：章节 idx → 领域 idx（-1 = 非领域章节）。
+	// buildDomains 按结构规则判定后填写，供无 URL 块裁决复用同一份判定结果（不另算一遍）。
+	chapterDomainIdx []int
+
 	doc    *Document
 	mode   string
 	strict bool
@@ -400,14 +414,15 @@ func Parse(text string, opts Options) *Document {
 	p.parseMetaBlock()
 	p.resolveMode(opts)
 	p.validateMeta()
-	p.passBullets()   // 趟 3：bullet 元信息
-	p.buildDomains()  // 趟 2b：章节分类（结构规则依赖趟 3 的 URL bullet 探测结果）
-	p.passTables()    // 趟 4：表格收集（表头驱动，绝不按列序）
-	p.routeSections() // 趟 5：#### 分桶（7 种 kind，前缀匹配）+ 内容路由
-	p.classifyProse() // 趟 6：散文归类
-	p.buildSchemas()  // 趟 7：命名结构 registry
-	p.checkSummary()  // 趟 8：汇总表 join 自检（C1）
-	p.finalize()      // 趟 9：identity + 双 hash
+	p.passBullets()           // 趟 3：bullet 元信息（无 URL 块只收集候选，E/W 裁决推迟）
+	p.buildDomains()          // 趟 2b：章节分类（结构规则依赖趟 3 的 URL bullet 探测结果）
+	p.adjudicateNoURLBlocks() // 趟 2b 收尾：领域分类已定，裁决无 URL 块 E-URL-FORMAT / W-UNPARSED-BLOCK
+	p.passTables()            // 趟 4：表格收集（表头驱动，绝不按列序）
+	p.routeSections()         // 趟 5：#### 分桶（7 种 kind，前缀匹配）+ 内容路由
+	p.classifyProse()         // 趟 6：散文归类
+	p.buildSchemas()          // 趟 7：命名结构 registry
+	p.checkSummary()          // 趟 8：汇总表 join 自检（C1）
+	p.finalize()              // 趟 9：identity + 双 hash
 	return p.doc
 }
 
@@ -771,15 +786,13 @@ func (p *parser) passBullets() {
 			raw := strings.Join(p.lines[blk.heading0:blk.end0], "\n")
 			p.doc.Unparsed = append(p.doc.Unparsed, UnparsedBlock{Line: blk.heading0 + 1, Heading: blk.title, RawMarkdown: raw})
 			if !st.urlish {
-				// 没有任何 URL 形态的 bullet：规范模式下 ### 必须是接口块 → E；init 模式只提示
-				want := "接口块必须含 - **URL**：" + q + "METHOD /path" + q + "（全角冒号 + backtick 包裹）"
-				if p.strict {
-					p.issueAt(LevelError, ErrURLFormat, blk.heading0+1, "### "+blk.title,
-						want, "该 ### 块没有可识别的 URL 行，无法入库")
-				} else {
-					p.issueAt(LevelWarning, WarnUnparsedBlock, blk.heading0+1, "### "+blk.title,
-						want, "该 ### 块没有 URL 行，按未解析块保留原文")
-				}
+				// 没有任何 URL 形态的 bullet：不当场报 E/W。此刻 passBullets 先于 buildDomains 跑，
+				// 还不知道所在 ## 章节是不是领域（结构规则依赖本趟刚算出的 urlish 探测结果）。
+				// 先收集候选，领域分类完成后由 adjudicateNoURLBlocks 裁决：
+				//   领域章节内的真接口缺 URL → E-URL-FORMAT（阻断，防静默丢接口）；
+				//   非领域章节（变更总览/概述等）的摘要块 → W-UNPARSED-BLOCK（保留原文，不阻断）。
+				// Unparsed 原文收录与推迟前完全一致，不受裁决影响。
+				p.noURLCandidates = append(p.noURLCandidates, bi)
 			}
 		}
 	}
@@ -898,6 +911,12 @@ func (p *parser) validateDeclarations(ep *Endpoint, blk *h3Block) {
 // buildDomains 领域判定用结构规则（该 ## 下存在带 **URL** bullet 的 ###），不用标题黑名单。
 // 必须在 bullet 趟之后跑（结构规则依赖 URL bullet 探测结果）。
 func (p *parser) buildDomains() {
+	// 章节 → 领域映射先全部置 -1（非领域），命中结构规则的章节再回填领域 idx。
+	// 无 URL 块的 E/W 裁决（adjudicateNoURLBlocks）直接复用这份判定，不重复算结构规则。
+	p.chapterDomainIdx = make([]int, len(p.chapters))
+	for ci := range p.chapterDomainIdx {
+		p.chapterDomainIdx[ci] = -1
+	}
 	for ci := range p.chapters {
 		chap := &p.chapters[ci]
 		urlish := false
@@ -918,6 +937,7 @@ func (p *parser) buildDomains() {
 			Sort: len(p.doc.Domains), Line: chap.heading0 + 1, NotesRaw: p.chapterPreamble(chap)}
 		p.doc.Domains = append(p.doc.Domains, dom)
 		di := len(p.doc.Domains) - 1
+		p.chapterDomainIdx[ci] = di // 本章节是领域：裁决无 URL 块时据此区分 E/W
 		for _, bi := range chap.h3s {
 			if ep := p.states[bi].ep; ep != nil {
 				ep.DomainIdx = di
@@ -956,6 +976,36 @@ func (p *parser) buildDomains() {
 		}
 	case prose != "":
 		p.doc.BasePath = prose
+	}
+}
+
+// adjudicateNoURLBlocks 无 URL 块的 E/W 裁决（趟 3 收集候选 → 趟 2b 领域分类后补发）。
+//
+// 为什么推迟：passBullets 先于 buildDomains 跑，发现「### 块没有 URL 行」时，
+// 所在 ## 章节究竟是不是领域还没算出来。结构规则（## 下存在带 URL bullet 的 ###
+// 才是领域）依赖 passBullets 的 urlish 探测，所以裁决必须等 buildDomains 完成。
+//
+// 裁决规则（沿用结构规则哲学，不用标题黑名单）：
+//   - 领域章节内的无 URL ### = 真接口缺 URL → strict 维持 E-URL-FORMAT（阻断，防静默丢接口）；
+//   - 非领域章节（变更总览/概述/对接清单等）的 ### 摘要块 → 降 W-UNPARSED-BLOCK（保留原文，不阻断）；
+//   - init 模式本就只提示（不阻断），无论是否领域一律 W（与推迟前行为一致）。
+//
+// 候选按块序（= 行号序）补发，issue 行号取块标题行，与推迟前逐字一致；
+// 文案（want/hint）也复用原 E/W 两套，不改写。Unparsed 原文已在 passBullets 收录，这里只发 Issue。
+func (p *parser) adjudicateNoURLBlocks() {
+	for _, bi := range p.noURLCandidates {
+		blk := &p.blocks[bi]
+		want := "接口块必须含 - **URL**：" + q + "METHOD /path" + q + "（全角冒号 + backtick 包裹）"
+		// 复用 buildDomains 的判定结果：章节 idx 落在 chapterDomainIdx 且映射到 >=0 的领域 = 领域章节。
+		// chapIdx < 0（顶层孤儿 ###，不在任何 ## 之下）按非领域处理 → W。
+		inDomain := blk.chapIdx >= 0 && blk.chapIdx < len(p.chapterDomainIdx) && p.chapterDomainIdx[blk.chapIdx] >= 0
+		if p.strict && inDomain {
+			p.issueAt(LevelError, ErrURLFormat, blk.heading0+1, "### "+blk.title,
+				want, "该 ### 块没有可识别的 URL 行，无法入库")
+		} else {
+			p.issueAt(LevelWarning, WarnUnparsedBlock, blk.heading0+1, "### "+blk.title,
+				want, "该 ### 块没有 URL 行，按未解析块保留原文")
+		}
 	}
 }
 
@@ -1375,13 +1425,64 @@ func (p *parser) routeExample(ep *Endpoint, kind string, f fenceBlock) {
 		ex.Kind = ExampleCURL
 		p.checkCURL(ep, f)
 	}
-	if ex.Kind != ExampleCURL && (f.info == "" || f.info == "json") {
-		if !json.Valid([]byte(f.content)) {
+	// JSON 校验只针对「应当是 JSON」的示例：
+	//   - 排除 curl（另有 checkCURL 一致性校验）；
+	//   - 排除 multipart 原始报文（已正确分类为 ExampleMultipart，本就不是 JSON，不该告警）；
+	//   - 无语言标记/json 标记的 fence 里，请求行示例（GET /path …）先剥掉请求行+头行，
+	//     剩余非空 body 才做 json.Valid——纯请求行/纯头不告警，请求行+JSON body 仍校验 body。
+	if ex.Kind != ExampleCURL && ex.Kind != ExampleMultipart && (f.info == "" || f.info == "json") {
+		body := stripRequestLine(f.content)
+		if strings.TrimSpace(body) != "" && !json.Valid([]byte(body)) {
 			p.issueAt(LevelWarning, WarnExampleJSON, f.start0+1, firstLine(f.content),
-				"示例块应为合法 JSON", "json.Unmarshal 失败（可能是 multipart 原始报文或请求行示例，属正常，预览确认即可）")
+				"示例块应为合法 JSON", "JSON 校验失败（multipart 报文与请求行示例已排除，此处多为真正的 JSON 写法问题，预览确认即可）")
 		}
 	}
 	ep.Examples = append(ep.Examples, ex)
+}
+
+// stripRequestLine 剥离「请求行 + 连续头行」前缀，返回剩余 body 供 JSON 校验。
+//
+// 背景：请求示例常写成原始报文形态——首个非空行是 `GET /api/...` 请求行，其后是
+// Content-Type: 等头行，空行之后才是 JSON body。请求行/头行本就不是 JSON，直接
+// json.Valid 必然失败 → 误告警（提示文案自己都写「属正常」）。本函数细化检查粒度：
+//   - 首个非空行匹配 ^(GET|POST|PUT|DELETE|PATCH) / 时，剥掉该行及其后连续「头形态」行；
+//   - 头行收口有两种（见下），返回剩余 body；纯请求行/纯头（无 body）→ 返回空串，调用方据此跳过校验；
+//   - 首个非空行不是请求行 → 原样返回（普通 JSON 示例不受影响，非法 JSON 照样告警）。
+//
+// 大小写敏感：方法必须大写。小写 `get /path` 不匹配 reRequestLine → 不剥离、整体仍走
+// json.Valid（保守取向：宁可多告警也不漏检，与「URL 行方法必须大写」的硬规则同口径）。
+//
+// 头行收口（11-01 check B6：防「无空行分隔的 body 被当头吞掉」漏检）：
+//   - 遇空行：标准 HTTP 头/body 分隔，body 从空行之后开始；
+//   - 遇首个「非头形态」非空行（如直接以 { 开头的 JSON body）：body 从该行起，停止剥离。
+//     否则 `POST /x\n{bad}` 这种无空行写法会把非法 body 当头吃掉、漏告警（少告警方向）。
+//     JSON body 首字符必为 { / [ / 引号 / 数字，绝不匹配 reHeaderLine，故此收口不误伤合法 body。
+//
+// 这样「请求行 + JSON body」的混合示例（无论有无空行分隔）仍能校验 body：body 非法时照样 W-EXAMPLE-JSON。
+// 独立成函数便于单测（见 TestStripRequestLine）。
+func stripRequestLine(content string) string {
+	lines := strings.Split(content, "\n")
+	// 跳过前导空行，定位首个非空行
+	i := 0
+	for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+		i++
+	}
+	if i >= len(lines) || !reRequestLine.MatchString(strings.TrimSpace(lines[i])) {
+		return content // 不是请求行示例：原样交给 json.Valid
+	}
+	// 剥请求行 + 后续连续「头形态」行，按上述两种收口返回 body
+	j := i + 1
+	for j < len(lines) {
+		t := strings.TrimSpace(lines[j])
+		if t == "" {
+			return strings.Join(lines[j+1:], "\n") // 空行分隔：body 在空行之后
+		}
+		if !reHeaderLine.MatchString(t) {
+			return strings.Join(lines[j:], "\n") // 无空行分隔：body 从本行（首个非头行）起
+		}
+		j++
+	}
+	return "" // 纯请求行 / 请求行 + 头行，没有 body
 }
 
 func firstLine(s string) string {
@@ -1672,6 +1773,10 @@ func (p *parser) recordTableHeader(ep *Endpoint, t *mdTable, kind, schemaName st
 // ===================== 趟 6：散文归类 =====================
 
 // classifyProse 区分「写了 无。」与「根本没有这个小节」：前者是明确无参数，后者是信息缺失（Unresolved）。
+// 唯一豁免（11-01-req-section-absent Decision 1）：「请求参数」小节整体缺失按无请求参数处理——
+// 不进 Unresolved/parse_state，只发一条 W-REQ-SECTION-ABSENT（init/incremental 都发，不阻断）；
+// ReqParamsState 仍诚实记 absent。路径含 {} 缺路径参数表、缺返回参数表、小节存在但空/引用式
+// （SectionProse/SectionCrossRef）不豁免——作者写了一半比整节省略更可疑。
 func (p *parser) classifyProse() {
 	for bi := range p.blocks {
 		st := &p.states[bi]
@@ -1684,7 +1789,12 @@ func (p *parser) classifyProse() {
 		ep.RespParamsState = p.classifyOne(ep, &st.resp, "response_params")
 		// Unresolved 槽位（删除声明允许省略参数/响应表，§8.2）
 		if ep.Change != ChangeRemoved {
-			if ep.ReqParamsState != SectionTable && ep.ReqParamsState != SectionEmpty {
+			if ep.ReqParamsState == SectionAbsent {
+				// 行号 = 接口标题行（小节根本不存在，没有更精确的行可指）；每接口一条。
+				p.issueAt(LevelWarning, WarnReqSectionAbsent, ep.Line, "",
+					"有 Query/Body/Header 参数时必须写「#### 请求参数」小节",
+					"请求参数小节缺失，已按无请求参数处理；如有 Query/Body/Header 参数请补写小节")
+			} else if ep.ReqParamsState != SectionTable && ep.ReqParamsState != SectionEmpty {
 				ep.Unresolved = append(ep.Unresolved, "request_params")
 			}
 			if ep.RespParamsState != SectionTable && ep.RespParamsState != SectionEmpty {

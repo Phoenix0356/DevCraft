@@ -21,6 +21,19 @@ func readFixture(t *testing.T, name string) string {
 	return string(b)
 }
 
+// readLocalFixture 读取不入仓库的本地参考文档：先 testdata/，再仓库根 .doc/（git 排除目录）。
+// 两处都没有则 Skip——文档不随仓库分发，新克隆环境不能因此红。
+func readLocalFixture(t *testing.T, name string) string {
+	t.Helper()
+	for _, p := range []string{filepath.Join("testdata", name), filepath.Join("..", "..", ".doc", name)} {
+		if b, err := os.ReadFile(p); err == nil {
+			return string(b)
+		}
+	}
+	t.Skipf("本地参考文档 %s 不存在（testdata/ 与 .doc/ 均未找到），跳过", name)
+	return ""
+}
+
 func parseInit(t *testing.T, text string) *Document {
 	t.Helper()
 	doc := Parse(text, Options{Mode: ModeInit})
@@ -217,6 +230,33 @@ func TestParseUserServiceGolden(t *testing.T) {
 			t.Fatalf("Issue 行号必给: %+v", is)
 		}
 	}
+
+	// 8.4 删除订阅 / 9.3 取消收藏 / 10.3 移出暂缓池：三条 DELETE 都缺请求参数小节，
+	// 且都缺返回参数表（只有「返回示例」JSON，没有 #### 返回参数 表）。
+	// 11-01-req-section-absent D1 豁免 request_params 后，这三条仍是 partial
+	// （response_params 真缺失不放松，D2），但 Unresolved 从 [request_params,response_params]
+	// 收窄为恰 [response_params]，并各发一条 W-REQ-SECTION-ABSENT（整篇共 3 条）。
+	// 这是预期语义变化（不是为绿而绿）：请求小节缺失不再污染 Unresolved，但返回表真缺失
+	// 照样 partial——豁免只针对「请求小节整体缺失」，不掩盖其它信息缺失。
+	for _, key := range []string{
+		"DELETE|/api/v1.0/user/subscription/{}",
+		"DELETE|/api/v1.0/user/favorite/{}",
+		"DELETE|/api/v1.0/user/deferred/{}",
+	} {
+		del := doc.FindEndpoint(key)
+		if del == nil {
+			t.Fatalf("%s 必须入库", key)
+		}
+		if del.ReqParamsState != SectionAbsent {
+			t.Fatalf("%s 请求小节应 SectionAbsent: %s", key, del.ReqParamsState)
+		}
+		if del.ParseState != ParsePartial || !equalNames(del.Unresolved, []string{"response_params"}) {
+			t.Fatalf("%s 返回表真缺失仍 partial 且槽位恰 [response_params]（request_params 已豁免）: state=%s unresolved=%v", key, del.ParseState, del.Unresolved)
+		}
+	}
+	if n := countCode(doc, WarnReqSectionAbsent); n != 3 {
+		t.Fatalf("用户服务 golden 恰 3 条请求小节整体缺失（8.4/9.3/10.3），W-REQ-SECTION-ABSENT 应=3，实际 %d", n)
+	}
 }
 
 // ===================== golden fixture：论文服务（11 条）=====================
@@ -277,7 +317,11 @@ func TestParsePaperServiceGolden(t *testing.T) {
 		parse.RequestFields[0].TypeKey != "Multipartfile" {
 		t.Fatalf("multipart 接口参数被污染: %+v", parse.RequestFields)
 	}
-	// 无语言标记的 multipart 报文块 → multipart_raw 示例 + W-EXAMPLE-JSON（属正常）
+	// 无语言标记的 multipart 报文块 → multipart_raw 示例（分类不变）。
+	// 11-01 修复（PRD Decision 2/3）：multipart 报文与纯请求行示例不再误告警 W-EXAMPLE-JSON——
+	// 它们本就不是 JSON，JSON 检查现在排除 ExampleMultipart 并剥离请求行前缀（stripRequestLine）。
+	// 本 golden 的全部 ```json 示例都是合法 JSON，故修复后整篇应零 W-EXAMPLE-JSON。
+	// 这是预期语义变化（不是为绿而绿）：旧断言要求「multipart/请求行示例应产生 W-EXAMPLE-JSON」已随修复反转。
 	var multipartSeen bool
 	for _, ex := range parse.Examples {
 		if ex.Kind == ExampleMultipart && strings.Contains(ex.Content, "Content-Disposition:") {
@@ -287,8 +331,13 @@ func TestParsePaperServiceGolden(t *testing.T) {
 	if !multipartSeen {
 		t.Fatalf("multipart 原始报文块应存为 multipart_raw 示例: %+v", parse.Examples)
 	}
-	if !doc.HasCode(WarnExampleJSON) {
-		t.Fatal("multipart/请求行示例应产生 W-EXAMPLE-JSON")
+	if doc.HasCode(WarnExampleJSON) {
+		for _, is := range doc.Warnings() {
+			if is.Code == WarnExampleJSON {
+				t.Logf("W-EXAMPLE-JSON line=%d snippet=%s", is.Line, is.Snippet)
+			}
+		}
+		t.Fatal("multipart/请求行示例已排除、golden 全为合法 JSON，不应再有 W-EXAMPLE-JSON")
 	}
 
 	// #### 括号变体前缀匹配：请求参数（ArxivPaperDTO）/ 返回参数（ApiResponse\<Boolean\>）
@@ -350,6 +399,26 @@ func TestParsePaperServiceGolden(t *testing.T) {
 		if is.Code == WarnCURLMismatch {
 			t.Fatalf("golden 文档不应有 curl 失配: line=%d snippet=%s", is.Line, is.Snippet)
 		}
+	}
+
+	// 5.2 查询论文简报（GET /api/v1.0/paper/brief/{paperId}）：请求参数小节整体缺失，
+	// 但路径参数表 + 返回参数表齐全。11-01-req-section-absent D1 之前这条是 partial
+	// （Unresolved=[request_params]）；D1「请求小节缺失=按无请求参数处理」之后升级为
+	// parse_state=ok、零 Unresolved，并发一条 W-REQ-SECTION-ABSENT（行号=接口标题行）。
+	// 这是预期语义变化（不是为绿而绿）：GET 无 Query/Body/Header 参数本就无需请求小节，
+	// 旧规则把「作者没写=没有」误判成「作者漏写=信息缺失」。ReqParamsState 仍诚实记 absent。
+	briefGet := doc.FindEndpoint("GET|/api/v1.0/paper/brief/{}")
+	if briefGet == nil {
+		t.Fatal("5.2 查询论文简报必须入库")
+	}
+	if briefGet.ReqParamsState != SectionAbsent {
+		t.Fatalf("5.2 请求小节应判 SectionAbsent（状态字段不撒谎）: %s", briefGet.ReqParamsState)
+	}
+	if briefGet.ParseState != ParseOK || len(briefGet.Unresolved) != 0 {
+		t.Fatalf("5.2 请求小节缺失豁免后应 ok 且零 Unresolved: state=%s unresolved=%v", briefGet.ParseState, briefGet.Unresolved)
+	}
+	if n := countCode(doc, WarnReqSectionAbsent); n != 1 {
+		t.Fatalf("论文服务 golden 恰 1 条请求小节整体缺失（5.2），W-REQ-SECTION-ABSENT 应=1，实际 %d", n)
 	}
 }
 
@@ -868,5 +937,492 @@ func TestSpecTextIsSingleSource(t *testing.T) {
 	}
 	if !strings.Contains(SpecText, "`POST /api/v1.0/user/subscription`") {
 		t.Fatal("SpecText 的 URL 示例必须带 backtick")
+	}
+}
+
+// ===================== 11-01：非接口块误阻断 + 示例 JSON 误告警 =====================
+
+// testMetaIncremental 内联回归用例的规范 meta 头（scope: incremental → strict）。
+const testMetaIncremental = fence3 + "apidoc-meta\nspec: 1\nproject: p\nscope: incremental\nchange_type: fix\nchange_title: t\nchange_note: n\n" + fence3 + "\n\n"
+
+// TestParseChangeOverviewFixture 仿用户真实文档结构（本地参考文档 .doc/paperpilot-change-overview.md，不入仓库）：
+// 非领域章节「变更总览」的两个无 URL ### 摘要块（表格型 + 列表型）不再误报 E 整批阻断，
+// 领域章节的规范接口块（请求行 / multipart / 请求行+JSON body 示例）不再误告警 W-EXAMPLE-JSON。
+// 变异依据：把 adjudicateNoURLBlocks 改回 passBullets 当场 E → 本 fixture 出 2 条 E-URL-FORMAT；
+// 去掉 routeExample 的 multipart 排除或 stripRequestLine → W-EXAMPLE-JSON 重新出现。
+func TestParseChangeOverviewFixture(t *testing.T) {
+	src := readLocalFixture(t, "paperpilot-change-overview.md")
+	doc := Parse(src, Options{})
+	if doc.Mode != ModeIncremental {
+		t.Fatalf("mode = %s, want incremental", doc.Mode)
+	}
+	// AC1：0 个 E（非接口摘要块不再整批阻断）
+	if doc.HasErrors() {
+		for _, is := range doc.Errors() {
+			t.Logf("E %s line=%d snippet=%s", is.Code, is.Line, is.Snippet)
+		}
+		t.Fatalf("fixture 导入应 0 阻断，实际 %d 条 E", len(doc.Errors()))
+	}
+	// 3 条真接口全部入库；变更总览不产生领域（结构规则：无 URL bullet 的章节非领域）
+	if len(doc.Endpoints) != 3 {
+		t.Fatalf("接口数 = %d, want 3", len(doc.Endpoints))
+	}
+	if len(doc.Domains) != 1 || doc.Domains[0].Name != "用户与认证" {
+		t.Fatalf("领域 = %+v, want 仅「用户与认证」（变更总览非领域）", doc.Domains)
+	}
+	// 非领域 ### 摘要块 → Unparsed 保留原文 + W-UNPARSED-BLOCK（不是 E）
+	for _, heading := range []string{"需要改代码的", "后端已修"} {
+		var u *UnparsedBlock
+		for i := range doc.Unparsed {
+			if doc.Unparsed[i].Heading == heading {
+				u = &doc.Unparsed[i]
+			}
+		}
+		if u == nil {
+			t.Fatalf("非接口块 %q 应进 Unparsed: %+v", heading, doc.Unparsed)
+		}
+		if !strings.Contains(u.RawMarkdown, "### "+heading) {
+			t.Fatalf("Unparsed 应保留 %q 原文: %.80s", heading, u.RawMarkdown)
+		}
+		// W-UNPARSED-BLOCK 行号 = 块标题行，hint 为「按未解析块保留原文」同款
+		var warned bool
+		for _, is := range doc.Warnings() {
+			if is.Code == WarnUnparsedBlock && is.Line == u.Line && strings.Contains(is.Hint, "按未解析块保留原文") {
+				warned = true
+			}
+		}
+		if !warned {
+			t.Fatalf("非接口块 %q 应报 W-UNPARSED-BLOCK（行 %d）: %+v", heading, u.Line, doc.Warnings())
+		}
+	}
+	// AC1：W-EXAMPLE-JSON 应为 0（multipart / 请求行 / 合法 body 都不再误告警）
+	if doc.HasCode(WarnExampleJSON) {
+		for _, is := range doc.Warnings() {
+			if is.Code == WarnExampleJSON {
+				t.Logf("W-EXAMPLE-JSON line=%d snippet=%s", is.Line, is.Snippet)
+			}
+		}
+		t.Fatal("fixture 不应有 W-EXAMPLE-JSON（multipart/请求行示例已排除、body 合法）")
+	}
+	// multipart 报文示例：Kind 正确（ExampleMultipart）且原文保真
+	parse := doc.FindEndpoint("POST|/api/v1.0/paper/parse")
+	if parse == nil {
+		t.Fatal("1.2 解析论文PDF 应入库")
+	}
+	var mp *Example
+	for i := range parse.Examples {
+		if parse.Examples[i].Kind == ExampleMultipart {
+			mp = &parse.Examples[i]
+		}
+	}
+	if mp == nil || !strings.Contains(mp.Content, "Content-Disposition:") {
+		t.Fatalf("multipart 报文应存为 ExampleMultipart: %+v", parse.Examples)
+	}
+	// 纯请求行示例：Kind=ExampleRequest（不是 multipart），无告警
+	byName := doc.FindEndpoint("GET|/api/v1.0/user")
+	if byName == nil || len(byName.Examples) == 0 || byName.Examples[0].Kind != ExampleRequest {
+		t.Fatalf("1.1 纯请求行示例应为 ExampleRequest: %+v", byName)
+	}
+	// 请求行 + 合法 JSON body 示例：仍存为 ExampleRequest，body 合法不告警
+	sub := doc.FindEndpoint("POST|/api/v1.0/user/subscription")
+	if sub == nil || len(sub.Examples) == 0 || sub.Examples[0].Kind != ExampleRequest {
+		t.Fatalf("1.3 请求行+JSON body 示例应为 ExampleRequest: %+v", sub)
+	}
+	// 确定性：两次解析字节一致（推迟裁决按候选块序补发，不得引入顺序随机）
+	b1, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal 1: %v", err)
+	}
+	b2, err := json.Marshal(Parse(src, Options{}))
+	if err != nil {
+		t.Fatalf("marshal 2: %v", err)
+	}
+	if string(b1) != string(b2) {
+		t.Fatal("fixture 两次解析结果不一致（推迟裁决破坏确定性）")
+	}
+}
+
+// TestParseNoURLBlockInDomainStillError 回归保护：领域章节内缺 URL 的 ### 是真接口缺 URL，
+// 必须仍报 E-URL-FORMAT 阻断（防静默丢接口）。推迟裁决不得因「推迟」而把它降成 W。
+// 变异依据：把 adjudicateNoURLBlocks 的 inDomain 分支改成一律 W → 本用例红。
+func TestParseNoURLBlockInDomainStillError(t *testing.T) {
+	src := testMetaIncremental +
+		"## 一、用户接口\n\n" +
+		"### 1.1 正常接口\n\n- **URL**：" + q + "GET /api/v1.0/user" + q + "\n- **变更**：未变更\n\n" +
+		"### 1.2 缺URL的接口\n\n这个块没有 URL 行。\n"
+	d := Parse(src, Options{})
+	if !d.HasCode(ErrURLFormat) {
+		t.Fatalf("领域章节缺 URL 接口应仍报 E-URL-FORMAT: %+v", d.Issues)
+	}
+	// E 落在缺 URL 块的标题行（带行号），而不是正常接口
+	var sawE bool
+	for _, is := range d.Errors() {
+		if is.Code == ErrURLFormat && strings.Contains(is.Snippet, "缺URL的接口") {
+			sawE = true
+			if is.Line <= 0 {
+				t.Fatalf("E-URL-FORMAT 行号必给: %+v", is)
+			}
+		}
+	}
+	if !sawE {
+		t.Fatalf("E-URL-FORMAT 应落在缺 URL 块上: %+v", d.Errors())
+	}
+	if d.FindEndpoint("GET|/api/v1.0/user") == nil {
+		t.Fatal("正常接口 1.1 应仍入库")
+	}
+	// 缺 URL 块仍进 Unparsed（原文保真，与推迟前一致）
+	var inUnparsed bool
+	for _, u := range d.Unparsed {
+		if u.Heading == "1.2 缺URL的接口" {
+			inUnparsed = true
+		}
+	}
+	if !inUnparsed {
+		t.Fatalf("缺 URL 块应进 Unparsed 保留原文: %+v", d.Unparsed)
+	}
+}
+
+// TestParseDialectURLStillErrorAfterAdjudication 回归保护：方言 **URL:**（半角）是 near-miss，
+// urlish=true → 不属于「无 URL 候选」，E-URL-FORMAT 由 parseBulletNearMiss 当场发出，
+// 不被推迟裁决降级；章节仍是领域（0 可入库 → W-EMPTY-DOMAIN）。
+// 变异依据：把 urlish 块也误收进候选并降 W → 本用例红（与 TestParseHalfWidthColonBullet 互补：
+// 那个用例无 meta、覆盖两模式，本用例带规范 meta 钉住 strict 下的领域判定不被推迟裁决改变）。
+func TestParseDialectURLStillErrorAfterAdjudication(t *testing.T) {
+	src := testMetaIncremental +
+		"## 一、用户接口\n\n" +
+		"### 1.1 方言URL\n\n- **URL:** " + q + "GET /api/v1.0/user" + q + "\n- **变更**：未变更\n"
+	d := Parse(src, Options{})
+	if !d.HasCode(ErrURLFormat) {
+		t.Fatalf("方言 **URL:** 必须仍报 E-URL-FORMAT: %+v", d.Issues)
+	}
+	if len(d.Endpoints) != 0 {
+		t.Fatalf("方言 URL 接口不能入库: %+v", d.Endpoints)
+	}
+	if !d.HasCode(WarnEmptyDomain) {
+		t.Fatalf("方言块 urlish=true → 章节仍是领域（0 可入库应报 W-EMPTY-DOMAIN）: %+v", d.Issues)
+	}
+}
+
+// TestParseNoURLAdjudicationInitMode init 模式：无 URL 块无论所在章节是否领域都只 W（不阻断），
+// 与推迟前行为一致（init 原本就是 W）。
+func TestParseNoURLAdjudicationInitMode(t *testing.T) {
+	metaInit := fence3 + "apidoc-meta\nspec: 1\nproject: p\nscope: init\n" + fence3 + "\n\n"
+	src := metaInit +
+		"## 一、用户接口\n\n" +
+		"### 1.1 正常接口\n\n- **URL**：" + q + "GET /api/v1.0/user" + q + "\n\n" +
+		"### 1.2 缺URL\n\n没有 URL 行。\n\n" +
+		"## 变更总览\n\n### 摘要块\n\n- 一条说明\n"
+	d := Parse(src, Options{})
+	if d.Mode != ModeInit {
+		t.Fatalf("mode = %s, want init", d.Mode)
+	}
+	if d.HasErrors() || d.HasCode(ErrURLFormat) {
+		t.Fatalf("init 模式无 URL 块不应阻断/报 E-URL-FORMAT: %+v", d.Issues)
+	}
+	// 领域内缺 URL 块（1.2）与非领域摘要块都 → W-UNPARSED-BLOCK（「按未解析块保留原文」同款）
+	var count int
+	for _, is := range d.Warnings() {
+		if is.Code == WarnUnparsedBlock && strings.Contains(is.Hint, "按未解析块保留原文") {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Fatalf("init 模式两个无 URL 块应各报一条 W-UNPARSED-BLOCK，实际 %d: %+v", count, d.Warnings())
+	}
+}
+
+// TestParseNoURLOrphanTopLevelBlock 顶层孤儿 ###（不在任何 ## 之下、无 URL）：
+// chapIdx=-1 → adjudicateNoURLBlocks 按非领域处理 → W-UNPARSED-BLOCK（不 panic、不阻断），原文进 Unparsed。
+// 这是裁决推迟后新增的边界（推迟前 passBullets 对 strict 一律 E，孤儿块也会被误 E）；
+// 变异依据：把 inDomain 的 chapIdx<0 分支误判为领域 → 本用例出 E（红）。
+func TestParseNoURLOrphanTopLevelBlock(t *testing.T) {
+	src := testMetaIncremental + "### 顶层摘要块\n\n- 一条没有 URL 的说明\n"
+	d := Parse(src, Options{})
+	if d.HasErrors() {
+		t.Fatalf("顶层孤儿无 URL ### 不应阻断: %+v", d.Errors())
+	}
+	if !d.HasCode(WarnUnparsedBlock) {
+		t.Fatalf("顶层孤儿无 URL ### 应报 W-UNPARSED-BLOCK: %+v", d.Issues)
+	}
+	var found bool
+	for _, u := range d.Unparsed {
+		if u.Heading == "顶层摘要块" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("顶层孤儿块应进 Unparsed 保留原文: %+v", d.Unparsed)
+	}
+}
+
+// exampleDoc 构造「一个 POST 接口 + 一个请求示例 fence」的规范文档，供示例 JSON 检查粒度用例。
+func exampleDoc(fenceInfo, content string) string {
+	return testMetaIncremental +
+		"## 一、用户接口\n\n" +
+		"### 1.1 新增订阅\n\n- **URL**：" + q + "POST /api/v1.0/user/subscription" + q + "\n- **变更**：未变更\n\n" +
+		"#### 请求示例\n\n" + fence3 + fenceInfo + "\n" + content + "\n" + fence3 + "\n"
+}
+
+// TestParseExampleJSONRefined 钉住示例 JSON 检查的细化粒度（PRD Decision 2/3）：
+// multipart 报文与纯请求行/纯头不告警；请求行+JSON body 仍校验 body（非法告警、合法不告警）；
+// 普通非法 JSON（无请求行前缀）照样告警——回归保护，检查强度不降。
+// 11-01 check B6：请求行后「无空行分隔」直接跟 body 时同样校验 body——头行剥离不得把
+// 非法 body 当头吞掉（漏检方向）。变异依据：去掉 stripRequestLine 的「非头行收口」分支 → 无空行非法 body 用例红。
+func TestParseExampleJSONRefined(t *testing.T) {
+	cases := []struct {
+		name     string
+		info     string
+		content  string
+		wantWarn bool
+		wantKind string
+	}{
+		{"纯请求行", "", "POST /api/v1.0/user/subscription", false, ExampleRequest},
+		{"请求行+头无body", "", "POST /api/v1.0/user/subscription\nContent-Type: application/json", false, ExampleRequest},
+		{"请求行+合法JSON body", "", "POST /api/v1.0/user/subscription\nContent-Type: application/json\n\n{\"topCategory\":\"cs\"}", false, ExampleRequest},
+		{"请求行+非法JSON body", "", "POST /api/v1.0/user/subscription\nContent-Type: application/json\n\n{bad json}", true, ExampleRequest},
+		{"请求行+合法JSON无空行", "", "POST /a\n{\"a\":1}", false, ExampleRequest},
+		{"请求行+非法JSON无空行", "", "POST /a\n{bad}", true, ExampleRequest},
+		{"头行后非法JSON无空行", "", "POST /a\nContent-Type: application/json\n{bad}", true, ExampleRequest},
+		{"multipart报文", "", "POST /api/v1.0/paper/parse\nContent-Type: multipart/form-data; boundary=X\n\n--X\nContent-Disposition: form-data; name=\"pdfFile\"\n\n[binary]\n--X--", false, ExampleMultipart},
+		{"json标记合法", "json", "{\"a\":1}", false, ExampleRequest},
+		{"json标记非法", "json", "{bad}", true, ExampleRequest},
+		{"无标记非法JSON", "", "{bad}", true, ExampleRequest},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := Parse(exampleDoc(c.info, c.content), Options{})
+			if d.HasErrors() {
+				t.Fatalf("不应有 E: %+v", d.Errors())
+			}
+			ep := d.FindEndpoint("POST|/api/v1.0/user/subscription")
+			if ep == nil || len(ep.Examples) != 1 {
+				t.Fatalf("应恰有一个示例: %+v", ep)
+			}
+			if ep.Examples[0].Kind != c.wantKind {
+				t.Fatalf("Kind = %s, want %s", ep.Examples[0].Kind, c.wantKind)
+			}
+			if got := d.HasCode(WarnExampleJSON); got != c.wantWarn {
+				t.Fatalf("W-EXAMPLE-JSON = %v, want %v: %+v", got, c.wantWarn, d.Issues)
+			}
+		})
+	}
+}
+
+// TestStripRequestLine 请求行剥离小函数的独立单测（PRD Decision 3 要求独立函数便于单测）。
+// 钉住：只在首个非空行是请求行时剥离请求行+连续「头形态」行（到首个空行或首个非头行收口），剩余 body 返回；
+// 纯请求行/纯头返回空串；非请求行原样返回（大小写敏感，方法必须大写）。
+// 无空行分隔用例（11-01 check B6）：body 直接跟在请求行/头行后时，从首个非头行起返回 body，不得吞掉。
+func TestStripRequestLine(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"纯请求行", "GET /api/v1.0/user?x=1", ""},
+		{"请求行+头无body", "POST /a\nContent-Type: application/json", ""},
+		{"请求行+头+空行+body", "POST /a\nContent-Type: application/json\n\n{\"x\":1}", "{\"x\":1}"},
+		{"请求行+空行+body", "GET /a\n\n{\"x\":1}", "{\"x\":1}"},
+		{"前导空行+请求行", "\n\nGET /a\n\n{\"x\":1}", "{\"x\":1}"},
+		{"请求行+非法body", "POST /a\n\n{bad}", "{bad}"},
+		{"请求行直接跟JSON无空行", "POST /a\n{\"x\":1}", "{\"x\":1}"},
+		{"请求行直接跟非法JSON无空行", "POST /a\n{bad}", "{bad}"},
+		{"头行后直接跟body无空行", "POST /a\nContent-Type: application/json\n{bad}", "{bad}"},
+		{"非请求行JSON原样", "{\"x\":1}", "{\"x\":1}"},
+		{"非请求行非法JSON原样", "{bad}", "{bad}"},
+		{"小写方法不算请求行", "get /a\n\n{\"x\":1}", "get /a\n\n{\"x\":1}"},
+		{"空内容", "", ""},
+		{"纯空白", "\n\n", "\n\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := stripRequestLine(c.content); got != c.want {
+				t.Fatalf("stripRequestLine(%q) = %q, want %q", c.content, got, c.want)
+			}
+		})
+	}
+}
+
+// ===================== 11-01-req-section-absent：请求参数小节缺失豁免 =====================
+
+// reqSectionDoc 构造「单接口 + 返回参数表齐全」的规范文档，请求参数小节由 reqSection 传入
+// （空串 = 整体缺失）。path 带 {id} 时用于路径参数真缺失分支。
+func reqSectionDoc(meta, url, changeLine, reqSection, pathSection string) string {
+	return meta +
+		"## 一、用户接口\n\n" +
+		"### 1.1 查询用户\n\n- **URL**：" + q + url + q + "\n" + changeLine + "\n" +
+		reqSection + pathSection +
+		"#### 返回参数\n\n| 参数名 | 类型 | 说明 |\n|---|---|---|\n| message | String | 响应消息 |\n"
+}
+
+const reqTableFull = "#### 请求参数\n\n| 参数名 | 类型 | 必填 | 位置 | 说明 |\n|---|---|---|---|---|\n| name | String | 否 | Query | 用户名 |\n\n"
+const pathTableFull = "#### 路径参数\n\n| 参数名 | 类型 | 必填 | 位置 | 说明 |\n|---|---|---|---|---|\n| id | Long | 是 | Path | 用户ID |\n\n"
+
+// countCode 数某码在报告里出现几次。
+func countCode(d *Document, code string) int {
+	n := 0
+	for _, is := range d.Issues {
+		if is.Code == code {
+			n++
+		}
+	}
+	return n
+}
+
+// TestParseReqSectionAbsentExempt 钉住 Decision 1/3：请求参数小节整体缺失 → 按无请求参数处理
+// （parse_state=ok、不进 Unresolved），每接口一条 W-REQ-SECTION-ABSENT、行号=接口标题行，
+// init/incremental 都发；ReqParamsState 仍诚实记 absent。
+// 变异依据：把 classifyProse 的 SectionAbsent 豁免去掉（恢复旧「缺失→Unresolved」）→ 本用例红
+// （ok 变 partial、W 消失）；把 W 的发放也去掉 → 警告计数断言红。
+func TestParseReqSectionAbsentExempt(t *testing.T) {
+	for _, mode := range []string{ModeIncremental, ModeInit} {
+		t.Run(mode, func(t *testing.T) {
+			meta := testMetaIncremental
+			changeLine := "- **变更**：新增\n"
+			if mode == ModeInit {
+				meta = fence3 + "apidoc-meta\nspec: 1\nproject: p\nscope: init\n" + fence3 + "\n\n"
+				changeLine = "" // init 允许缺变更行
+			}
+			d := Parse(reqSectionDoc(meta, "GET /api/v1.0/user", changeLine, "", ""), Options{})
+			if d.HasErrors() {
+				t.Fatalf("缺请求小节不应阻断: %+v", d.Errors())
+			}
+			ep := d.FindEndpoint("GET|/api/v1.0/user")
+			if ep == nil {
+				t.Fatal("接口应入库")
+			}
+			if ep.ParseState != ParseOK || len(ep.Unresolved) != 0 {
+				t.Fatalf("请求小节整体缺失应 ok 且零 Unresolved: state=%s unresolved=%v", ep.ParseState, ep.Unresolved)
+			}
+			if ep.ReqParamsState != SectionAbsent {
+				t.Fatalf("ReqParamsState 必须诚实记 absent（状态字段不撒谎）: %s", ep.ReqParamsState)
+			}
+			if n := countCode(d, WarnReqSectionAbsent); n != 1 {
+				t.Fatalf("W-REQ-SECTION-ABSENT 应每接口一条，实际 %d: %+v", n, d.Issues)
+			}
+			for _, is := range d.Warnings() {
+				if is.Code == WarnReqSectionAbsent {
+					if is.Line != ep.Line {
+						t.Fatalf("W 行号应=接口标题行 %d，实际 %d", ep.Line, is.Line)
+					}
+					if !strings.Contains(is.Hint, "请求参数小节缺失，已按无请求参数处理") {
+						t.Fatalf("W 文案不符: %+v", is)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestParseReqSectionTrueGapsStillPartial 钉住 Decision 2「保留不放松」：
+// 路径含 {} 缺路径参数表 / 缺返回参数表 / 小节存在但空（SectionProse）→ 仍 Unresolved/partial。
+// 变异依据：把豁免扩大到 path_params/response_params 或 SectionProse → 对应用例红。
+func TestParseReqSectionTrueGapsStillPartial(t *testing.T) {
+	t.Run("路径占位符缺路径参数表", func(t *testing.T) {
+		d := Parse(reqSectionDoc(testMetaIncremental, "GET /api/v1.0/user/{id}", "- **变更**：新增\n", "", ""), Options{})
+		ep := d.FindEndpoint("GET|/api/v1.0/user/{}")
+		if ep == nil {
+			t.Fatal("接口应入库")
+		}
+		if ep.ParseState != ParsePartial {
+			t.Fatalf("路径含 {} 缺路径参数表必须仍 partial: %s", ep.ParseState)
+		}
+		if !equalNames(ep.Unresolved, []string{"path_params"}) {
+			t.Fatalf("Unresolved 应恰为 [path_params]（request_params 已豁免）: %v", ep.Unresolved)
+		}
+		// 请求小节豁免照常生效：真缺失场景里仍发且只发一条 W
+		if n := countCode(d, WarnReqSectionAbsent); n != 1 {
+			t.Fatalf("请求小节缺失的 W 照发，实际 %d", n)
+		}
+	})
+	t.Run("缺返回参数表", func(t *testing.T) {
+		src := testMetaIncremental +
+			"## 一、用户接口\n\n### 1.1 查询用户\n\n- **URL**：" + q + "GET /api/v1.0/user" + q + "\n- **变更**：新增\n\n" + reqTableFull
+		d := Parse(src, Options{})
+		ep := d.FindEndpoint("GET|/api/v1.0/user")
+		if ep.ParseState != ParsePartial || !equalNames(ep.Unresolved, []string{"response_params"}) {
+			t.Fatalf("缺返回参数表必须仍 partial 且槽位=response_params: state=%s unresolved=%v", ep.ParseState, ep.Unresolved)
+		}
+		if countCode(d, WarnReqSectionAbsent) != 0 {
+			t.Fatal("请求参数表齐全时不得发 W-REQ-SECTION-ABSENT")
+		}
+	})
+	t.Run("请求小节存在但空", func(t *testing.T) {
+		d := Parse(reqSectionDoc(testMetaIncremental, "GET /api/v1.0/user", "- **变更**：新增\n", "#### 请求参数\n\n", ""), Options{})
+		ep := d.FindEndpoint("GET|/api/v1.0/user")
+		if ep.ParseState != ParsePartial || !equalNames(ep.Unresolved, []string{"request_params"}) {
+			t.Fatalf("小节存在但空（写了一半更可疑）必须仍 partial: state=%s unresolved=%v", ep.ParseState, ep.Unresolved)
+		}
+		if ep.ReqParamsState != SectionProse {
+			t.Fatalf("空小节应判 SectionProse: %s", ep.ReqParamsState)
+		}
+		if countCode(d, WarnReqSectionAbsent) != 0 {
+			t.Fatal("小节存在（只是空）不属于「整体缺失」，不得发 W-REQ-SECTION-ABSENT")
+		}
+	})
+	t.Run("路径参数表齐全则不报路径缺失", func(t *testing.T) {
+		d := Parse(reqSectionDoc(testMetaIncremental, "GET /api/v1.0/user/{id}", "- **变更**：新增\n", "", pathTableFull), Options{})
+		ep := d.FindEndpoint("GET|/api/v1.0/user/{}")
+		if ep.ParseState != ParseOK || len(ep.Unresolved) != 0 {
+			t.Fatalf("路径表齐全 + 请求小节缺失豁免 → ok: state=%s unresolved=%v", ep.ParseState, ep.Unresolved)
+		}
+	})
+}
+
+// TestParseReqSectionRefAndEmptyUnchanged 引用式与「无。」的行为一字不变（Decision 2）：
+// 引用式 strict E-CROSS-REF / init W-CROSS-REF + partial + Unresolved request_params；
+// 「无。」= SectionEmpty → ok、零 W-REQ-SECTION-ABSENT。
+func TestParseReqSectionRefAndEmptyUnchanged(t *testing.T) {
+	t.Run("引用式strict", func(t *testing.T) {
+		d := Parse(reqSectionDoc(testMetaIncremental, "GET /api/v1.0/user", "- **变更**：新增\n", "#### 请求参数\n\n同 1.2。\n\n", ""), Options{})
+		if !d.HasCode(ErrCrossRef) {
+			t.Fatalf("引用式 strict 必须仍 E-CROSS-REF: %+v", d.Issues)
+		}
+		ep := d.FindEndpoint("GET|/api/v1.0/user")
+		if ep.ParseState != ParsePartial || ep.ReqParamsState != SectionCrossRef || !equalNames(ep.Unresolved, []string{"request_params"}) {
+			t.Fatalf("引用式仍 partial + Unresolved request_params: %+v", ep)
+		}
+		if countCode(d, WarnReqSectionAbsent) != 0 {
+			t.Fatal("引用式不是「整体缺失」，不得发 W-REQ-SECTION-ABSENT")
+		}
+	})
+	t.Run("引用式init", func(t *testing.T) {
+		meta := fence3 + "apidoc-meta\nspec: 1\nproject: p\nscope: init\n" + fence3 + "\n\n"
+		d := Parse(reqSectionDoc(meta, "GET /api/v1.0/user", "", "#### 请求参数\n\n同 1.2。\n\n", ""), Options{})
+		if d.HasErrors() || !d.HasCode(WarnCrossRef) {
+			t.Fatalf("init 引用式应降级 W-CROSS-REF 不阻断: %+v", d.Issues)
+		}
+		ep := d.FindEndpoint("GET|/api/v1.0/user")
+		if ep.ParseState != ParsePartial || !equalNames(ep.Unresolved, []string{"request_params"}) {
+			t.Fatalf("init 引用式仍 partial: %+v", ep)
+		}
+	})
+	t.Run("明确无参数", func(t *testing.T) {
+		d := Parse(reqSectionDoc(testMetaIncremental, "GET /api/v1.0/user", "- **变更**：新增\n", "#### 请求参数\n\n无。\n\n", ""), Options{})
+		ep := d.FindEndpoint("GET|/api/v1.0/user")
+		if ep.ParseState != ParseOK || ep.ReqParamsState != SectionEmpty || len(ep.Unresolved) != 0 {
+			t.Fatalf("「无。」应 ok + SectionEmpty: %+v", ep)
+		}
+		if countCode(d, WarnReqSectionAbsent) != 0 {
+			t.Fatal("写了「无。」不得发 W-REQ-SECTION-ABSENT")
+		}
+	})
+}
+
+// TestParseReqSectionAbsentRemovedDeclaration 删除声明允许省略参数/响应表（§8.2）：
+// 不发 W-REQ-SECTION-ABSENT（删除块本就不要求小节，发了是噪音）、不进 Unresolved。
+func TestParseReqSectionAbsentRemovedDeclaration(t *testing.T) {
+	src := testMetaIncremental +
+		"## 一、用户接口\n\n### 1.1 删除用户\n\n- **URL**：" + q + "DELETE /api/v1.0/user/{id}" + q + "\n" +
+		"- **变更**：删除\n- **变更点**：合规下线\n"
+	d := Parse(src, Options{})
+	if d.HasErrors() {
+		t.Fatalf("删除声明不应阻断: %+v", d.Errors())
+	}
+	ep := d.FindEndpoint("DELETE|/api/v1.0/user/{}")
+	if ep == nil || len(ep.Unresolved) != 0 || ep.ParseState != ParseOK {
+		t.Fatalf("删除声明豁免一切参数小节: %+v", ep)
+	}
+	if countCode(d, WarnReqSectionAbsent) != 0 {
+		t.Fatalf("删除声明不得发 W-REQ-SECTION-ABSENT: %+v", d.Issues)
 	}
 }

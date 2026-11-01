@@ -38,7 +38,7 @@ const (
 	ErrMetaUnknownKey       = "E-META-UNKNOWN-KEY"         // meta 出现字典外的键
 	ErrEndpointNoDomain     = "E-ENDPOINT-NO-DOMAIN"       // 接口块不在任何 ## 之下
 	ErrEndpointDup          = "E-ENDPOINT-DUP"             // 同文档内 identity_key 重复
-	ErrURLFormat            = "E-URL-FORMAT"               // URL 行不合格式
+	ErrURLFormat            = "E-URL-FORMAT"               // URL 行不合格式（无 URL 的 ### 仅领域章节内报 E；非领域章节降 W-UNPARSED-BLOCK）
 	ErrMethodInvalid        = "E-METHOD-INVALID"           // 方法不在 GET/POST/PUT/DELETE/PATCH 大写集合
 	ErrChangeMissing        = "E-CHANGE-MISSING"           // 缺 **变更** 行（规范模式）
 	ErrChangeEnum           = "E-CHANGE-ENUM"              // 变更/breaking 取值越界
@@ -62,7 +62,7 @@ const (
 // 警告码全集（spec-draft §9 表 + §10 的 init 降级）。
 const (
 	WarnBasePathAssert  = "W-BASEPATH-ASSERT-FAIL" // 路径不以 base_path 开头（只断言不剥离，D18）
-	WarnExampleJSON     = "W-EXAMPLE-JSON"         // 示例块不是合法 JSON（可能是 multipart 原始报文，属正常）
+	WarnExampleJSON     = "W-EXAMPLE-JSON"         // 示例块不是合法 JSON（已排除 multipart 报文与请求行示例，只校验剩下的 JSON body）
 	WarnCURLMismatch    = "W-CURL-MISMATCH"        // curl 里的 method/path 与 **URL** 行不一致
 	WarnStructDiverged  = "W-STRUCT-DIVERGED"      // 同名命名结构不同构 → ambiguous，拒绝按名自动展开
 	WarnPosInferred     = "W-POS-INFERRED"         // init 模式缺「位置」列，按 method 推断（需人工核对）
@@ -71,6 +71,10 @@ const (
 	WarnUnparsedBlock   = "W-UNPARSED-BLOCK"       // 无法解析的块（孤儿代码块 / 无 URL 的 ### / 方言 bullet）
 	WarnSummaryDiverged = "W-SUMMARY-DIVERGED"     // C1 汇总闭合失败（正文 URL 集 vs 接口汇总表双向差集）
 	WarnCrossRef        = "W-CROSS-REF"            // init 模式下 E-CROSS-REF 的降级形态
+	// W-REQ-SECTION-ABSENT「请求参数」小节整体缺失，按无请求参数处理（11-01-req-section-absent D1）：
+	// 不进 Unresolved、parse_state=ok，init/incremental 都发、每接口一条、行号=接口标题行、不阻断。
+	// 真缺失（路径含 {} 缺路径参数表 / 缺返回参数表 / 小节存在但空或引用式）不在此豁免。
+	WarnReqSectionAbsent = "W-REQ-SECTION-ABSENT"
 )
 
 // HasErrors 是否存在阻断级 Issue（整批拒收的判据）。
