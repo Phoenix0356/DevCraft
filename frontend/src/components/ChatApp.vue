@@ -42,6 +42,7 @@ import {
 import {renderMarkdown} from '../lib/markdown'      // Markdown → HTML
 import {decorateCodeBlocks} from '../lib/md-blocks' // HTML → 给每个代码块套标题栏外壳（见 lib/md-blocks.js）
 import {copyText} from '../lib/clipboard'           // 剪贴板写入（含 http 非安全上下文降级，见 lib/clipboard.js）
+import {downloadText} from '../lib/download'        // Blob 文本下载（与接口文档「导出文档」共用一份实现）
 import SettingsModal from './SettingsModal.vue'     // 设置弹窗子组件
 import SkillManager from './SkillManager.vue'       // 技能管理视图（主区三态之一，卡片网格 + 详情弹窗）
 import AgentManager from './AgentManager.vue'       // 智能体管理视图（主区三态之一，卡片网格 + 详情弹窗）
@@ -614,29 +615,20 @@ function fixedNameOf(fileName) {
   return `${base || 'api-doc'}.fixed.md`
 }
 
-/** Blob 下载（桌面 WebView2 与浏览器都支持）：失败降级为弹窗 + 复制（D7/AC6） */
+/** Blob 下载（桌面 WebView2 与浏览器都支持）：失败降级为弹窗 + 复制（D7/AC6）。
+ *  下载动作本身收在 lib/download.js（与 ApiDocManager「导出文档」共用一份实现）。 */
 function downloadFixedText() {
   const card = apiImport.value
   const text = card?.fixedText || ''
   if (!text) return
-  try {
-    const blob = new Blob([text], {type: 'text/markdown;charset=utf-8'})
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = fixedNameOf(card.fileName)
-    a.rel = 'noopener'
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    // 立刻 revoke 会让部分浏览器/WebView 取消还没起步的下载，延后一拍再回收
-    setTimeout(() => URL.revokeObjectURL(url), 2000)
-    message.success(`修正稿已导出为 ${fixedNameOf(card.fileName)}（原文件未被改写）`)
-  } catch {
-    fixedModalText.value = text
-    fixedModalShow.value = true
-    message.warning('当前环境不允许下载，已弹出修正稿全文供复制')
+  const name = fixedNameOf(card.fileName)
+  if (downloadText(name, text)) {
+    message.success(`修正稿已导出为 ${name}（原文件未被改写）`)
+    return
   }
+  fixedModalText.value = text
+  fixedModalShow.value = true
+  message.warning('当前环境不允许下载，已弹出修正稿全文供复制')
 }
 
 /** 复制修正稿：走与代码块「复制」同一个 copyText（共用 helper，双路降级见 lib/clipboard.js） */
