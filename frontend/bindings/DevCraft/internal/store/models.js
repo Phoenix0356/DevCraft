@@ -565,6 +565,15 @@ export class ApiEntry {
              */
             this["parseState"] = "";
         }
+        if (!("unresolved" in $$source)) {
+            /**
+             * Unresolved 未解析槽位（request_params|path_params|response_params），JSON 数组落库。
+             * 详情页 partial 横幅据此列出具体缺失小节；存量旧行空数组 → 前端兜底原文案，重导治愈。
+             * @member
+             * @type {string[]}
+             */
+            this["unresolved"] = [];
+        }
         if (!("rawMarkdown" in $$source)) {
             /**
              * @member
@@ -618,7 +627,11 @@ export class ApiEntry {
      * @returns {ApiEntry}
      */
     static createFrom($$source = {}) {
+        const $$createField15_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("unresolved" in $$parsedSource) {
+            $$parsedSource["unresolved"] = $$createField15_0($$parsedSource["unresolved"]);
+        }
         return new ApiEntry(/** @type {Partial<ApiEntry>} */($$parsedSource));
     }
 }

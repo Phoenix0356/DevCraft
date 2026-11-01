@@ -142,10 +142,10 @@ type ApiDocImportPreview struct {
 	NextSeq     int                   `json:"nextSeq"` // 将分配的事件版本号（0 = 本次不生成事件）
 	Meta        ApiDocMetaPreview     `json:"meta"`
 	Stats       ApiDocImportStats     `json:"stats"`
-	Issues      []apidoc.Issue        `json:"issues"`  // 文档自身 bug + 与库矛盾（E-*/W-*，含行号；AutoFix 时为修复后重新完整校验的剩余问题）
-	Fixes       []ApiDocFix           `json:"fixes"`   // 已自动修复清单（未启用 AutoFix = 空数组）
+	Issues      []apidoc.Issue        `json:"issues"`    // 文档自身 bug + 与库矛盾（E-*/W-*，含行号；AutoFix 时为修复后重新完整校验的剩余问题）
+	Fixes       []ApiDocFix           `json:"fixes"`     // 已自动修复清单（未启用 AutoFix = 空数组）
 	FixedText   string                `json:"fixedText"` // 修复稿全文（D7/AC6「下载修正后的 md」的数据源）：仅 AutoFix 通道非空；本轮零修复时 = 原文（前端按 fixes 是否为空决定要不要给下载按钮）。未启用 AutoFix = 空串（零指针约定）
-	Changes     []ApiDocChangePreview `json:"changes"` // 变更分栏
+	Changes     []ApiDocChangePreview `json:"changes"`   // 变更分栏
 	Domains     []ApiDomainCandidate  `json:"domains"`
 	Notes       []string              `json:"notes"`   // 中文提示（幂等重导的陈旧声明等，不新增错误码）
 	Message     string                `json:"message"` // 一句话汇总
@@ -337,7 +337,7 @@ func (s *Service) PreviewApiDocImport(req ApiDocImportRequest) (ApiDocImportPrev
 // 强制闸门（全部在服务层，chat 路径也绕不过去）：
 //  0. AutoFix（聊天附件通道）先跑确定性修复器再重新完整校验（D3/D4），修复稿全文随
 //     结果卡的 fixedText 带回前端（D7/AC6 下载修正稿，不写回原文件）；
-//  0.5 解析档位权威闸（§13.26，取代 §13.18）：req.InitMode 是档位的唯一权威——
+//     0.5 解析档位权威闸（§13.26，取代 §13.18）：req.InitMode 是档位的唯一权威——
 //     文档自声明 scope: init 而未勾选 → 拒收；勾选了而文档声明 incremental/full →
 //     同样拒收；文档无 meta.scope 时勾选才决定兜底档位。**所有通道同一条闸**，
 //     界面向导与模型驱动技能都不再能被文档自声明绕过严格校验。
@@ -973,6 +973,11 @@ func sortedAmbiguousSchemaNames(names map[string]bool) []string {
 
 // entryNeedsWrite 判断既有条目是否需要重写（定义列逐一对照；hash 只是快速通道，
 // 占位符改名等 cosmetic 也要能触发 path_raw 同步）。
+// parse_state/unresolved 对照是存量治愈的判据（11-01-req-section-absent R6）：
+// 规则放宽前入库的 partial 条目，重导同文档时双 hash 不变（SemanticHash 不含
+// ParseState/Unresolved），但 parse_state partial→ok / unresolved 槽位集变化
+// 必须触发重写——增量声明「未变更」走 apiActionDocSync（不发事件），init 走覆盖更新。
+// unresolved 单独对照还负责给「仍 partial 的存量旧行」回填槽位明细（旧库该列恒 '[]'）。
 func (s *Service) entryNeedsWrite(plan *apiDocPlan, p *apiEntryPlan) bool {
 	e, ep := p.existing, p.ep
 	if e.SemanticHash != ep.SemanticHash || e.DocHash != ep.DocHash {
@@ -983,6 +988,9 @@ func (s *Service) entryNeedsWrite(plan *apiDocPlan, p *apiEntryPlan) bool {
 		e.ParseState != ep.ParseState || e.RawMarkdown != ep.RawMarkdown ||
 		e.BasePathAssert != plan.basePath ||
 		e.Status != store.ApiEntryStatusActive || e.DeletedAt != 0 {
+		return true
+	}
+	if strings.Join(e.Unresolved, ",") != strings.Join(ep.Unresolved, ",") {
 		return true
 	}
 	domainID := ""
@@ -1063,8 +1071,9 @@ func (s *Service) writeApiEntry(tx *store.Tx, plan *apiDocPlan, p *apiEntryPlan,
 		Name: ep.Name, Method: ep.Method, PathRaw: ep.PathRaw, IdentityKey: ep.IdentityKey,
 		BasePathAssert: plan.basePath, ContentType: ep.ContentType, Auth: ep.Auth,
 		Visibility: p.visibility, SemanticHash: ep.SemanticHash, DocHash: ep.DocHash,
-		Description: ep.Description, ParseState: ep.ParseState, RawMarkdown: ep.RawMarkdown,
-		Status: store.ApiEntryStatusActive, DeletedAt: 0, Sort: p.sort, CreatedAt: p.existing.CreatedAt,
+		Description: ep.Description, ParseState: ep.ParseState, Unresolved: ep.Unresolved,
+		RawMarkdown: ep.RawMarkdown,
+		Status:      store.ApiEntryStatusActive, DeletedAt: 0, Sort: p.sort, CreatedAt: p.existing.CreatedAt,
 	}
 	if err := tx.SaveApiEntry(&e); err != nil {
 		return "", fmt.Errorf("写入接口条目失败: %w", err)
@@ -1674,7 +1683,7 @@ func (s *Service) GetApiEntry(id string) (ApiEntryDetail, error) {
 //	  name / description / contentType / auth / visibility / sort / domainId（限同项目内移动）
 //	服务端保留列（一律沿用库里既有值，不接受入参）：
 //	  id / projectId / identityKey / method / pathRaw / basePathAssert / semanticHash /
-//	  docHash / rawMarkdown / parseState / status / deletedAt / createdAt
+//	  docHash / rawMarkdown / parseState / unresolved / status / deletedAt / createdAt
 //
 // status 与 deletedAt 只能通过 DeleteApiEntry / RestoreApiEntry 改——软删/恢复是独立语义，
 // 混进手工编辑就等于让「删除」变成一个可能被漏传的字段。

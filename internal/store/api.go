@@ -142,12 +142,15 @@ type ApiEntry struct {
 	DocHash        string `json:"docHash"`
 	Description    string `json:"description"`
 	ParseState     string `json:"parseState"` // ok | partial | unparsed
-	RawMarkdown    string `json:"rawMarkdown"`
-	Status         string `json:"status"` // active | removed（软删）
-	DeletedAt      int64  `json:"deletedAt"`
-	Sort           int    `json:"sort"`
-	CreatedAt      int64  `json:"createdAt"`
-	UpdatedAt      int64  `json:"updatedAt"`
+	// Unresolved 未解析槽位（request_params|path_params|response_params），JSON 数组落库。
+	// 详情页 partial 横幅据此列出具体缺失小节；存量旧行空数组 → 前端兜底原文案，重导治愈。
+	Unresolved  []string `json:"unresolved"`
+	RawMarkdown string   `json:"rawMarkdown"`
+	Status      string   `json:"status"` // active | removed（软删）
+	DeletedAt   int64    `json:"deletedAt"`
+	Sort        int      `json:"sort"`
+	CreatedAt   int64    `json:"createdAt"`
+	UpdatedAt   int64    `json:"updatedAt"`
 }
 
 // ApiField 参数/返回/VO 字段：一行一字段。字段级 diff 的身份就在
@@ -605,21 +608,48 @@ func deleteApiDomainRow(x apiExecutor, id string) error {
 // ===================== 接口条目 CRUD =====================
 
 const apiEntryCols = `id, project_id, domain_id, name, method, path_raw, identity_key, base_path_assert,
-	content_type, auth, visibility, semantic_hash, doc_hash, description, parse_state, raw_markdown,
+	content_type, auth, visibility, semantic_hash, doc_hash, description, parse_state, unresolved, raw_markdown,
 	status, deleted_at, sort, created_at, updated_at`
 
 func scanApiEntry(row interface{ Scan(...any) error }) (ApiEntry, error) {
 	var e ApiEntry
+	var unresolved string
 	err := row.Scan(&e.ID, &e.ProjectID, &e.DomainID, &e.Name, &e.Method, &e.PathRaw, &e.IdentityKey,
 		&e.BasePathAssert, &e.ContentType, &e.Auth, &e.Visibility, &e.SemanticHash, &e.DocHash,
-		&e.Description, &e.ParseState, &e.RawMarkdown, &e.Status, &e.DeletedAt, &e.Sort, &e.CreatedAt, &e.UpdatedAt)
+		&e.Description, &e.ParseState, &unresolved, &e.RawMarkdown, &e.Status, &e.DeletedAt, &e.Sort, &e.CreatedAt, &e.UpdatedAt)
+	e.Unresolved = unmarshalUnresolved(unresolved)
 	return e, err
+}
+
+// marshalUnresolved 槽位数组 → JSON 列值（nil/空一律 '[]'，JS 侧拿到数组而不是 null）。
+func marshalUnresolved(slots []string) string {
+	if len(slots) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(slots)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
+// unmarshalUnresolved JSON 列值 → 槽位数组（空串/非法 JSON 一律按空数组，绝不向上抛错：
+// 这是展示辅助列，存量旧行 DEFAULT '[]'，损坏值不该挡住条目读取）。
+func unmarshalUnresolved(s string) []string {
+	if s == "" {
+		return []string{}
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(s), &out); err != nil || out == nil {
+		return []string{}
+	}
+	return out
 }
 
 // SaveApiEntry 按 UNIQUE(project_id, identity_key) upsert 接口定义（只存当前态），回填 id/created_at。
 // 重新出现的历史软删条目由调用方传 Status=active / DeletedAt=0 完成「恢复」（change_type=restored）。
 //
-// ⚠️ 全列 upsert：21 列一次写满，入参没带的列会被直接清零（parse_state/status/visibility
+// ⚠️ 全列 upsert：22 列一次写满，入参没带的列会被直接清零（parse_state/status/visibility
 // 还有空值兜底，会把「未解析」这类事实静默改掉）。除导入链路（它本来就产出全量定义）外，
 // 手工编辑请走 appsvc.SaveApiEntry —— 那边做了读-改-写并列出了服务端保留列清单。
 func (s *Store) SaveApiEntry(e *ApiEntry) error { return saveApiEntry(s.db, e) }
@@ -647,19 +677,21 @@ func saveApiEntry(x apiExecutor, e *ApiEntry) error {
 	}
 	_, err := x.Exec(
 		`INSERT INTO api_entries (id, project_id, domain_id, name, method, path_raw, identity_key, base_path_assert,
-		   content_type, auth, visibility, semantic_hash, doc_hash, description, parse_state, raw_markdown,
+		   content_type, auth, visibility, semantic_hash, doc_hash, description, parse_state, unresolved, raw_markdown,
 		   status, deleted_at, sort, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(project_id, identity_key) DO UPDATE SET
 		   domain_id = excluded.domain_id, name = excluded.name, method = excluded.method,
 		   path_raw = excluded.path_raw, base_path_assert = excluded.base_path_assert,
 		   content_type = excluded.content_type, auth = excluded.auth, visibility = excluded.visibility,
 		   semantic_hash = excluded.semantic_hash, doc_hash = excluded.doc_hash,
 		   description = excluded.description, parse_state = excluded.parse_state,
+		   unresolved = excluded.unresolved,
 		   raw_markdown = excluded.raw_markdown, status = excluded.status,
 		   deleted_at = excluded.deleted_at, sort = excluded.sort, updated_at = excluded.updated_at`,
 		e.ID, e.ProjectID, e.DomainID, e.Name, e.Method, e.PathRaw, e.IdentityKey, e.BasePathAssert,
 		e.ContentType, e.Auth, e.Visibility, e.SemanticHash, e.DocHash, e.Description, e.ParseState,
+		marshalUnresolved(e.Unresolved),
 		e.RawMarkdown, e.Status, e.DeletedAt, e.Sort, e.CreatedAt, e.UpdatedAt)
 	if err != nil {
 		return err
@@ -698,10 +730,11 @@ func getApiEntryByIdentity(x apiExecutor, projectID, identityKey string) (ApiEnt
 }
 
 // ListApiEntries 浏览列表（R9）：domainID 为空 = 全项目；默认过滤 removed 与 internal。
-// 不返回 raw_markdown（大文本，详情页走 GetApiEntry）。
+// 不返回 raw_markdown（大文本，详情页走 GetApiEntry）；unresolved 是小 JSON 数组，随列表带回
+// （详情页 partial 横幅在详情拉取完成前也要能列出缺失槽位）。
 func (s *Store) ListApiEntries(projectID, domainID string, includeRemoved, includeInternal bool) ([]ApiEntry, error) {
 	query := `SELECT id, project_id, domain_id, name, method, path_raw, identity_key, base_path_assert,
-		content_type, auth, visibility, semantic_hash, doc_hash, description, parse_state, '',
+		content_type, auth, visibility, semantic_hash, doc_hash, description, parse_state, unresolved, '',
 		status, deleted_at, sort, created_at, updated_at FROM api_entries WHERE project_id = ?`
 	args := []any{projectID}
 	if domainID != "" {
@@ -723,11 +756,13 @@ func (s *Store) ListApiEntries(projectID, domainID string, includeRemoved, inclu
 	var out []ApiEntry
 	for rows.Next() {
 		var e ApiEntry
+		var unresolved string
 		if err := rows.Scan(&e.ID, &e.ProjectID, &e.DomainID, &e.Name, &e.Method, &e.PathRaw, &e.IdentityKey,
 			&e.BasePathAssert, &e.ContentType, &e.Auth, &e.Visibility, &e.SemanticHash, &e.DocHash,
-			&e.Description, &e.ParseState, &e.RawMarkdown, &e.Status, &e.DeletedAt, &e.Sort, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			&e.Description, &e.ParseState, &unresolved, &e.RawMarkdown, &e.Status, &e.DeletedAt, &e.Sort, &e.CreatedAt, &e.UpdatedAt); err != nil {
 			return nil, err
 		}
+		e.Unresolved = unmarshalUnresolved(unresolved)
 		out = append(out, e)
 	}
 	return out, rows.Err()

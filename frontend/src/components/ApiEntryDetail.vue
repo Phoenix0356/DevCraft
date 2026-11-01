@@ -88,9 +88,33 @@ function reqText(v) {
  *  raw_markdown（大文本列，store/api.go:634-637 直接 SELECT ''），列表行里它恒为空串 */
 const rawMd = computed(() => detail.value?.entry?.rawMarkdown || props.entry?.rawMarkdown || '')
 
+/** 未解析槽位键 → 中文名（与后端 store.ApiEntry.Unresolved 的槽位键一一对应，
+ *  详情页 partial 横幅据此列出「缺哪些小节」，不再只给一句笼统提示） */
+const UNRESOLVED_LABEL = {
+  request_params: '请求参数',
+  path_params: '路径参数',
+  response_params: '返回参数'
+}
+
+/** 未解析槽位数组：优先详情整行（GetApiEntry 的 detail.entry），退回列表行 props.entry
+ *  （ListApiEntries 也带 unresolved 小 JSON 列，详情未加载完时横幅也能先列出缺失小节）。
+ *  存量旧行该列恒 '[]'（加列迁移 DEFAULT），此时 names 为空 → 横幅走 fallback 原文案，
+ *  重导同文档后由后端 entryNeedsWrite 的槽位对照治愈/回填（11-01-req-section-absent R5/R6）。 */
+const unresolvedSlots = computed(() => {
+  const d = detail.value?.entry?.unresolved
+  if (Array.isArray(d) && d.length) return d
+  const l = entry.value.unresolved
+  return Array.isArray(l) ? l : []
+})
+
 const parseHint = computed(() => {
   const s = entry.value.parseState || ''
-  if (s === 'partial') return '有未解析项（文档缺小节或写法不合规范），需人工核对原文'
+  if (s === 'partial') {
+    // 有槽位明细 → 列出缺失小节中文名；空数组（存量旧行/未回填）→ 退回原笼统文案
+    const names = unresolvedSlots.value.map(k => UNRESOLVED_LABEL[k]).filter(Boolean)
+    if (names.length) return `有未解析项（缺失小节：${names.join('、')}），需人工核对原文`
+    return '有未解析项（文档缺小节或写法不合规范），需人工核对原文'
+  }
   if (s === 'unparsed') return '该条目基本未解析成功，内容不可信，请核对原文后重新导入'
   return ''
 })

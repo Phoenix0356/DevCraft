@@ -1572,3 +1572,194 @@ func TestCommitApiDocImportResultCards(t *testing.T) {
 		t.Fatalf("数组字段不得为 nil: notes=%v domains=%v", multi.Notes, third.CreatedDomains)
 	}
 }
+
+// ===================== 11-01-req-section-absent R6：存量 partial 治愈 =====================
+
+// cureExportDoc 单接口「导出登录日志」：GET 无请求参数（请求小节整体缺失）+ 返回参数表齐全。
+// 新规则下 parse_state=ok、Unresolved 空；changeLine 控制声明（新增铺底 / 未变更重导）。
+func cureExportDoc(changeLine string) string {
+	return "# 演示服务接口变更文档\n\n" + apiMetaBlock("demo-svc", "fix", "存量治愈", "重导同文档治愈 partial", "REQ-CURE") +
+		"## 一、日志接口\n\n" +
+		"### 1.1 导出登录日志\n\n导出登录日志 CSV，无请求参数。\n\n" +
+		"- **URL**：`GET /api/v1/demo/login-log/export`\n" +
+		"- **认证**：需要登录\n" + changeLine + "\n" +
+		apiRespSection("| message | String | 响应消息 |")
+}
+
+// cureExportInitDoc 同上，但 scope:init（init 允许缺变更行），用于验证 init 覆盖更新治愈路径。
+func cureExportInitDoc() string {
+	meta := "```apidoc-meta\nspec: 1\nproject: demo-svc\nservice: 演示服务\nbase_path: /api/v1/demo\nscope: init\n```\n\n"
+	return "# 演示服务接口文档\n\n" + meta +
+		"## 一、日志接口\n\n" +
+		"### 1.1 导出登录日志\n\n导出登录日志 CSV，无请求参数。\n\n" +
+		"- **URL**：`GET /api/v1/demo/login-log/export`\n" +
+		"- **认证**：需要登录\n\n" +
+		apiRespSection("| message | String | 响应消息 |")
+}
+
+// cureBackfillDoc 请求参数表齐全、但故意不写返回参数表 → response_params 真缺失，
+// 新旧规则下都 partial。用于验证「仍 partial 的存量旧行」回填 unresolved 槽位明细。
+func cureBackfillDoc(changeLine string) string {
+	return "# 演示服务接口变更文档\n\n" + apiMetaBlock("demo-svc", "fix", "槽位回填", "仍 partial 的存量行回填 unresolved", "REQ-BF") +
+		"## 一、报表接口\n\n" +
+		"### 1.1 报表统计\n\n统计报表数据。\n\n" +
+		"- **URL**：`GET /api/v1/demo/report-stats`\n" +
+		"- **认证**：需要登录\n" + changeLine + "\n" +
+		apiParamSection("| page | Int | 否 | Query | 1 | 页码 |")
+}
+
+// forceLegacyPartial 用 store 全列 upsert 把库里条目改成「规则放宽前入库的存量 partial 行」：
+// 只动 parse_state/unresolved，双 hash/字段/原文一律保留（SemanticHash 不含这两列，故重导同
+// 文档时双 hash 不变）。绕过 svc.SaveApiEntry 手工编辑保留列闸门——那扇门会拒绝改 parse_state，
+// 而存量治愈面对的真实旧行恰恰是 parse_state=partial。
+func forceLegacyPartial(t *testing.T, svc *Service, projectID, key string, unresolved []string) {
+	t.Helper()
+	e := mustEntryByIdentity(t, svc, projectID, key)
+	e.ParseState = store.ApiParseStatePartial
+	e.Unresolved = unresolved
+	if err := svc.store.SaveApiEntry(&e); err != nil {
+		t.Fatalf("模拟存量 partial 行: %v", err)
+	}
+}
+
+// TestApiDocImportReqSectionAbsentCure 钉住 R6「存量治愈」：规则放宽前以 partial 入库的条目，
+// 重导同一份文档后 parse_state 自动变 ok，且全程不产生变更事件。
+//
+// 治愈判据在 entryNeedsWrite：SemanticHash/DocHash 都不含 ParseState/Unresolved，重导同文档双
+// hash 不变，但 e.ParseState(partial) != ep.ParseState(ok) 触发重写——
+//   - 增量声明「未变更」→ apiActionDocSync（写条目、不发事件，AC4）；
+//   - init → apiActionUpdate 覆盖（init 本就不发事件，R10）。
+//
+// 变异依据：把 entryNeedsWrite 里的 ParseState 对照删掉 → 增量/init 治愈子用例红（partial 不被
+// 重写、仍 partial）；把 Unresolved 对照删掉 → 回填子用例红（仍 partial 的旧行槽位不回填）。
+func TestApiDocImportReqSectionAbsentCure(t *testing.T) {
+	const exportKey = "GET|/api/v1/demo/login-log/export"
+
+	t.Run("增量未变更走docSync治愈且不发事件", func(t *testing.T) {
+		svc := newTestService(t)
+		first := commitApiDoc(t, svc, ApiDocImportRequest{DocText: cureExportDoc("- **变更**：新增\n")})
+		projectID := first.ProjectID
+		if first.EventID == 0 {
+			t.Fatalf("铺底新增应生成事件: %+v", first)
+		}
+		// 新规则下首导即 ok（请求小节缺失豁免）；随后人为改回旧规则 partial 态模拟存量行
+		e0 := mustEntryByIdentity(t, svc, projectID, exportKey)
+		if e0.ParseState != store.ApiParseStateOK || len(e0.Unresolved) != 0 {
+			t.Fatalf("新规则首导应 ok 且零 Unresolved: state=%s unresolved=%v", e0.ParseState, e0.Unresolved)
+		}
+		forceLegacyPartial(t, svc, projectID, exportKey, []string{"request_params"})
+		eventsBefore := apiEventCount(t, svc, projectID)
+
+		// 重导同文档、声明「未变更」→ doc-sync 治愈：parse_state partial→ok、Unresolved 清空
+		cure := commitApiDoc(t, svc, ApiDocImportRequest{DocText: cureExportDoc("- **变更**：未变更\n")})
+		if cure.EventID != 0 || cure.Seq != 0 {
+			t.Fatalf("存量治愈不得生成事件: %+v", cure)
+		}
+		if n := apiEventCount(t, svc, projectID); n != eventsBefore {
+			t.Fatalf("治愈前后事件总数变了: %d → %d（doc-sync 不发事件）", eventsBefore, n)
+		}
+		if !strings.Contains(cure.Message, "仅同步了 1") {
+			t.Fatalf("应走 doc-sync 同步 1 个条目: %q", cure.Message)
+		}
+		healed := mustEntryByIdentity(t, svc, projectID, exportKey)
+		if healed.ParseState != store.ApiParseStateOK || len(healed.Unresolved) != 0 {
+			t.Fatalf("存量 partial 未被治愈: state=%s unresolved=%v", healed.ParseState, healed.Unresolved)
+		}
+		if healed.ID != e0.ID {
+			t.Fatalf("治愈应原地更新而非新建: %s → %s", e0.ID, healed.ID)
+		}
+
+		// 再导一次：已 ok 且双 hash/Unresolved 全等 → 零写入短路（UpdatedAt 不变）
+		again := commitApiDoc(t, svc, ApiDocImportRequest{DocText: cureExportDoc("- **变更**：未变更\n")})
+		if again.EventID != 0 || !strings.Contains(again.Message, "无变更") {
+			t.Fatalf("治愈后重导应零写入「无变更」: %+v", again)
+		}
+		final := mustEntryByIdentity(t, svc, projectID, exportKey)
+		if final.UpdatedAt != healed.UpdatedAt {
+			t.Fatalf("治愈后重导必须零写入: updated_at %d → %d", healed.UpdatedAt, final.UpdatedAt)
+		}
+		if n := apiEventCount(t, svc, projectID); n != eventsBefore {
+			t.Fatalf("零写入重导不得发事件: %d → %d", eventsBefore, n)
+		}
+	})
+
+	t.Run("init覆盖更新治愈且不发事件", func(t *testing.T) {
+		svc := newTestService(t)
+		first := commitApiDoc(t, svc, ApiDocImportRequest{
+			DocText: cureExportInitDoc(), ProjectName: "demo-svc", InitMode: true})
+		projectID := first.ProjectID
+		if first.EventID != 0 {
+			t.Fatalf("init 不应产生事件: %+v", first)
+		}
+		forceLegacyPartial(t, svc, projectID, exportKey, []string{"request_params"})
+
+		// 二次 init（项目非空需放行）→ entryNeedsWrite 因 ParseState 差异判 true → 覆盖更新
+		again := commitApiDoc(t, svc, ApiDocImportRequest{
+			DocText: cureExportInitDoc(), ProjectName: "demo-svc", InitMode: true, AllowInitOnNonEmpty: true})
+		if again.EventID != 0 {
+			t.Fatalf("init 治愈不得产生事件: %+v", again)
+		}
+		if again.Stats.Updated != 1 {
+			t.Fatalf("init 治愈应覆盖 1 条: stats=%+v", again.Stats)
+		}
+		if !strings.Contains(again.Message, "覆盖 1") {
+			t.Fatalf("init 结果应说明覆盖 1 条: %q", again.Message)
+		}
+		healed := mustEntryByIdentity(t, svc, projectID, exportKey)
+		if healed.ParseState != store.ApiParseStateOK || len(healed.Unresolved) != 0 {
+			t.Fatalf("init 存量 partial 未被治愈: state=%s unresolved=%v", healed.ParseState, healed.Unresolved)
+		}
+		if n := apiEventCount(t, svc, projectID); n != 0 {
+			t.Fatalf("init 全程零事件: %d", n)
+		}
+	})
+
+	t.Run("仍partial的存量旧行回填unresolved槽位", func(t *testing.T) {
+		svc := newTestService(t)
+		const statsKey = "GET|/api/v1/demo/report-stats"
+		first := commitApiDoc(t, svc, ApiDocImportRequest{DocText: cureBackfillDoc("- **变更**：新增\n")})
+		projectID := first.ProjectID
+		// 返回表真缺失 → 新旧规则都 partial、Unresolved=[response_params]（D2 不放松）
+		e0 := mustEntryByIdentity(t, svc, projectID, statsKey)
+		if e0.ParseState != store.ApiParseStatePartial || !equalSlotNames(e0.Unresolved, []string{"response_params"}) {
+			t.Fatalf("返回表真缺失应 partial 且槽位=[response_params]: state=%s unresolved=%v", e0.ParseState, e0.Unresolved)
+		}
+		// 模拟旧库：unresolved 列恒 '[]'（旧代码不落该列），parse_state 仍 partial
+		forceLegacyPartial(t, svc, projectID, statsKey, nil)
+		legacy := mustEntryByIdentity(t, svc, projectID, statsKey)
+		if len(legacy.Unresolved) != 0 {
+			t.Fatalf("用例前提：旧行 unresolved 应为空: %v", legacy.Unresolved)
+		}
+		eventsBefore := apiEventCount(t, svc, projectID)
+
+		// 重导同文档「未变更」：ParseState 仍 partial（相等），但 Unresolved 由 [] → [response_params]
+		// 触发 entryNeedsWrite 的槽位对照 → doc-sync 回填明细，条目仍 partial、不发事件
+		cure := commitApiDoc(t, svc, ApiDocImportRequest{DocText: cureBackfillDoc("- **变更**：未变更\n")})
+		if cure.EventID != 0 || !strings.Contains(cure.Message, "仅同步了 1") {
+			t.Fatalf("槽位回填应走 doc-sync 且不发事件: %+v", cure)
+		}
+		if n := apiEventCount(t, svc, projectID); n != eventsBefore {
+			t.Fatalf("回填不得发事件: %d → %d", eventsBefore, n)
+		}
+		back := mustEntryByIdentity(t, svc, projectID, statsKey)
+		if back.ParseState != store.ApiParseStatePartial {
+			t.Fatalf("返回表真缺失治愈后仍应 partial（不放松 D2）: %s", back.ParseState)
+		}
+		if !equalSlotNames(back.Unresolved, []string{"response_params"}) {
+			t.Fatalf("存量旧行 unresolved 槽位未回填: %v", back.Unresolved)
+		}
+	})
+}
+
+// equalSlotNames 顺序敏感比对槽位数组（与 apidoc 包 equalNames 同义，跨包不可复用故本地定义）。
+func equalSlotNames(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
