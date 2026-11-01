@@ -37,6 +37,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"DevCraft/internal/apidoc"
 	"DevCraft/internal/store"
@@ -255,6 +256,96 @@ const (
 // 界面导出 api-doc-spec.md 与 skill prompt 字节一致，AC9）。
 func (s *Service) ExportApiDocSpec() (string, error) {
 	return apidoc.SpecText, nil
+}
+
+// ExportApiProjectDoc 把项目的库内当前态渲染成一份全量规范文档（Markdown）。
+//
+// 与 ExportApiDocSpec 是两回事：那个导出「怎么写文档」的规范，这个导出「项目现在
+// 有哪些接口」的快照。快照头部的「本次更新」节取 seq 最大的变更事件（摘要 + 涉及
+// 接口清单）；项目没有事件时整节省略。
+//
+// 数据来源是结构化行而不是 api_entries.raw_markdown：raw 是「上次导入时的原文」，
+// 手工编辑（SaveApiEntry）不会刷新它，只有结构化字段/示例/命名结构才是当前态权威。
+// 渲染走 apidoc.RenderExport（round-trip 保证导出文档可被重新导入作基线，单测断言）。
+func (s *Service) ExportApiProjectDoc(projectID string) (string, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return "", fmt.Errorf("请先选择接口项目")
+	}
+	proj, err := s.store.GetApiProject(projectID)
+	if err != nil {
+		return "", err
+	}
+	domains, err := s.store.ListApiDomains(projectID)
+	if err != nil {
+		return "", fmt.Errorf("读取领域失败: %w", err)
+	}
+	// internal 一并导出：快照追求全量，内部接口以「（内部）」章节如实呈现
+	entries, err := s.store.ListApiEntries(projectID, "", false, true)
+	if err != nil {
+		return "", fmt.Errorf("读取接口条目失败: %w", err)
+	}
+	if len(entries) == 0 {
+		return "", fmt.Errorf("项目「%s」还没有可导出的接口", proj.Name)
+	}
+
+	byDomain := map[string][]*apidoc.Endpoint{}
+	for i := range entries {
+		e := entries[i]
+		ep, err := s.rebuildEndpoint(s.store, projectID, e)
+		if err != nil {
+			return "", err
+		}
+		ep.Unresolved = e.Unresolved // 槽位明细参与导出判定（partial 忠实往返）
+		examples, err := s.store.ListApiExamples(store.ApiOwnerEndpoint, e.ID)
+		if err != nil {
+			return "", fmt.Errorf("读取接口示例失败: %w", err)
+		}
+		for _, x := range examples {
+			ep.Examples = append(ep.Examples, apidoc.Example{
+				Kind: x.Kind, Language: x.Language, Content: x.Content, Sort: x.Sort})
+		}
+		byDomain[e.DomainID] = append(byDomain[e.DomainID], ep)
+	}
+
+	in := apidoc.ExportInput{
+		Title:      proj.Display + " 接口文档",
+		ExportedAt: time.Now().Format("2006-01-02 15:04:05"),
+		Total:      len(entries),
+		Meta:       apidoc.Meta{Project: proj.Name, Service: proj.Display, BasePath: proj.BasePath},
+	}
+	// 领域按库内 sort 序（ListApiDomains 已排序）；域外孤儿条目（领域被删但条目留档，
+	// domain_id=''）收进末尾「未分类」章。空领域（无条目且无备注）不进导出，避免空章节。
+	for _, d := range domains {
+		if eps := byDomain[d.ID]; len(eps) > 0 || d.NotesRaw != "" {
+			in.Domains = append(in.Domains, apidoc.ExportDomain{
+				Name: d.Name, Internal: d.Internal, NotesRaw: d.NotesRaw, Entries: eps})
+		}
+	}
+	if eps := byDomain[""]; len(eps) > 0 {
+		in.Domains = append(in.Domains, apidoc.ExportDomain{Entries: eps})
+	}
+
+	if events, err := s.store.ListApiChangeEvents(projectID, 1); err == nil && len(events) > 0 {
+		ev := events[0]
+		u := &apidoc.ExportUpdate{
+			Seq: ev.Seq, Label: ev.Label, Title: ev.Title, Reason: ev.Reason,
+			CreatedAt: time.UnixMilli(ev.CreatedAt).Format("2006-01-02 15:04"),
+		}
+		items, err := s.store.ListApiChangeItems(ev.ID)
+		if err != nil {
+			return "", fmt.Errorf("读取变更明细失败: %w", err)
+		}
+		for _, it := range items {
+			u.Items = append(u.Items, apidoc.ExportUpdateItem{
+				Method: it.Method, Path: it.Path, EntryName: it.EntryName,
+				ChangeType: it.ChangeType, ChangePoint: it.DeclaredNote})
+		}
+		in.Update = u
+		in.Meta.VersionTag = ev.Label
+	} else if err != nil {
+		return "", fmt.Errorf("读取变更事件失败: %w", err)
+	}
+	return apidoc.RenderExport(in), nil
 }
 
 // ===================== 导入预览（只读，绝不写库）=====================

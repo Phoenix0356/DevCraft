@@ -5,7 +5,7 @@
 
   布局结构（全部普通 flex div —— 仓库对三栏没有任何现成件可抄，且 ChatApp.vue:860-864
   已用 display:flex 覆盖 n-layout 默认行为；n-layout 多 sider 行为未经验证，不赌）：
-    顶层两个 tab（接口 / 变更事件）+ 右上角全局按钮（导入文档 / 导出规范 / 删除项目）。
+    顶层两个 tab（接口 / 变更事件）+ 右上角全局按钮（导入文档 / 导出文档 / 导出规范 / 删除项目）。
     tab 用两个按钮 + v-if 切换实现（不是 n-tabs）：本模块三栏需要自己声明 height 与
     分区滚动，仓库无「全高 n-tabs」先例，硬穿 :deep() 不如沿用 ChatApp 的 view 字符串习惯。
     「接口」tab = 三栏：
@@ -25,7 +25,7 @@
     导入视图：screen='import' 时整块换成 ApiDocImport（返回列表由 @cancel 触发）。
 
   数据来源：ListApiProjects / ListApiDomains / ListApiEntries / ExportApiDocSpec /
-  DeleteApiProject / SaveApiDomain / DeleteApiDomain（bindings 桩）；
+  ExportApiProjectDoc / DeleteApiProject / SaveApiDomain / DeleteApiDomain（bindings 桩）；
   事件侧数据在 ApiChangeEvents / ApiEventDetail 内部自取；
   详情与编辑在 ApiEntryDetail 内部自取（GetApiEntry/SaveApiEntry）。
 
@@ -42,12 +42,13 @@ import {computed, onMounted, ref} from 'vue'
 import {useMessage} from 'naive-ui'
 import {
   ListApiProjects, ListApiDomains, ListApiEntries,
-  ExportApiDocSpec, DeleteApiProject, SaveApiDomain, DeleteApiDomain
+  ExportApiDocSpec, ExportApiProjectDoc, DeleteApiProject, SaveApiDomain, DeleteApiDomain
 } from '../../bindings/DevCraft/app.js'
 import ApiEntryDetail from './ApiEntryDetail.vue'
 import ApiDocImport from './ApiDocImport.vue'
 import ApiChangeEvents from './ApiChangeEvents.vue'
 import {copyText} from '../lib/clipboard' // 剪贴板写入共用 helper（含 http 非安全上下文降级，见 lib/clipboard.js）
+import {downloadText} from '../lib/download' // Blob 文本下载（与 ChatApp 修正稿下载同一实现，见 lib/download.js）
 
 const message = useMessage()
 
@@ -55,9 +56,13 @@ const message = useMessage()
 const tab = ref('entries')      // 'entries' | 'events'
 const screen = ref('browse')    // 'browse' | 'import'
 const exporting = ref(false)    // 导出规范 loading（防重复点）
+const exportingDoc = ref(false) // 导出接口文档 loading（防重复点）
 const deletingProject = ref(false)
+// 全文降级弹窗（两种导出共用：规范复制失败 / 接口文档下载失败）
 const showSpecModal = ref(false)
 const specText = ref('')
+const modalKind = ref('spec')   // 'spec' | 'doc'：只切标题与提示文案
+const modalFileName = ref('')   // doc 分支要落盘的文件名（手动保存时照它命名）
 // 事件详情跳转意图（0 = 无）：ApiChangeEvents 挂载时消费一次；手动切 tab 会清零，
 // 否则用户点「变更事件」看列表时会被上一次的跳转意图拽进详情
 const pendingEventId = ref(0)
@@ -308,6 +313,7 @@ async function exportSpec() {
     if (await copyText(text)) {
       message.success(`规范全文已复制（${text.length} 字符），可存入业务仓库作为 api-doc-spec.md`)
     } else {
+      modalKind.value = 'spec'
       specText.value = text
       showSpecModal.value = true
       message.warning('剪贴板不可用，已弹出全文供手动复制')
@@ -316,6 +322,50 @@ async function exportSpec() {
     message.error(String(err))
   } finally {
     exporting.value = false
+  }
+}
+
+/** 导出文档名：<项目名>-接口文档-<YYYYMMDD>.md。
+ *  项目名来自文档 meta，可能带路径非法字符，这里替掉；同一天重复导出覆盖同名文件，
+ *  正好符合「发最新一份给前端」的用法。 */
+function docFileName(projectName) {
+  const d = new Date()
+  const pad = n => String(n).padStart(2, '0')
+  const safe = String(projectName || 'api').replace(/[\\/:*?"<>|]/g, '_')
+  return `${safe}-接口文档-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.md`
+}
+
+/** 导出全量接口文档：后端按库内当前态（结构化行，不是可能陈旧的 raw_markdown）渲染一份
+ *  规范 Markdown，头部带最新一次变更事件的说明与涉及接口清单——发给前端即可直接读，
+ *  也能当 init 基线重新导入（后端单测钉住 round-trip 零阻断）。
+ *  落盘走 Blob 下载（桌面 WebView2 与浏览器行为一致）；环境不允许下载时降级为弹窗全文。 */
+async function exportDoc() {
+  const p = currentProject.value
+  if (!p) {
+    message.warning('请先在左栏选择项目')
+    return
+  }
+  exportingDoc.value = true
+  const name = docFileName(p.name)
+  try {
+    const text = (await ExportApiProjectDoc(p.id)) || ''
+    if (!text) {
+      message.error('导出失败：后端返回空内容')
+      return
+    }
+    if (downloadText(name, text)) {
+      message.success(`已导出 ${name}（${text.length} 字符，落在浏览器下载目录）`)
+    } else {
+      modalKind.value = 'doc'
+      modalFileName.value = name
+      specText.value = text
+      showSpecModal.value = true
+      message.warning('当前环境不允许下载，已弹出全文供手动复制')
+    }
+  } catch (err) {
+    message.error(String(err)) // 「项目「x」还没有可导出的接口」等中文提示原样展示
+  } finally {
+    exportingDoc.value = false
   }
 }
 
@@ -438,6 +488,7 @@ function domainCrumb(id) {
         </div>
         <div class="head-actions">
           <n-button size="small" type="primary" ghost @click="screen = 'import'">导入文档</n-button>
+          <n-button size="small" :loading="exportingDoc" :disabled="!currentProject" @click="exportDoc">导出文档</n-button>
           <n-button size="small" :loading="exporting" @click="exportSpec">导出规范</n-button>
           <n-popconfirm
             v-if="currentProject"
@@ -605,18 +656,23 @@ function domainCrumb(id) {
       </div>
     </template>
 
-    <!-- 导出规范降级弹窗：剪贴板不可用时展示全文（v-if + :show="true" 关闭即销毁） -->
+    <!-- 全文降级弹窗：导出规范（剪贴板不可用）/ 导出文档（不允许下载）共用一只，
+         文案按 modalKind 分支（v-if + :show="true" 关闭即销毁） -->
     <n-modal
       v-if="showSpecModal"
       :show="true"
       preset="card"
-      title="接口变更文档规范（api-doc-spec.md）"
+      :title="modalKind === 'doc' ? `接口文档全文（${modalFileName}）` : '接口变更文档规范（api-doc-spec.md）'"
       style="width: 760px"
       :segmented="{content: true}"
       @update:show="showSpecModal = false"
     >
       <div class="spec-body">
-        <div class="spec-tip">
+        <div v-if="modalKind === 'doc'" class="spec-tip">
+          按库内当前态渲染，头部「本次更新」是最新一次变更事件的说明与涉及接口清单。
+          当前环境不允许自动下载，请手动复制保存为 <code>{{ modalFileName }}</code>。
+        </div>
+        <div v-else class="spec-tip">
           与 chat skill 内置的规范文本同源同字节（PRD D15/AC9）。请保存为业务仓库的
           <code v-pre>api-doc-spec.md</code>，供外部 agent 按规范产出变更文档。
         </div>

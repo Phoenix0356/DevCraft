@@ -118,6 +118,16 @@ export function ExportApiDocSpec() {
 }
 
 /**
+ * ExportApiProjectDoc 导出某个项目的「当前全量接口文档」（库内结构化行渲染，含最新一次
+ * 变更事件摘要）。前端：ExportApiProjectDoc(projectId)
+ * @param {string} projectId
+ * @returns {$CancellablePromise<string>}
+ */
+export function ExportApiProjectDoc(projectId) {
+    return $Call.ByID(19801036, projectId);
+}
+
+/**
  * GetApiChangeEvent 事件详情（事件头 + 明细含 diff 载荷；不含 doc_text）。
  * 前端：GetApiChangeEvent(id)
  * @param {number} id

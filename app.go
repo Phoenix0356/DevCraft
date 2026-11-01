@@ -458,6 +458,16 @@ func (a *App) ExportApiDocSpec() (string, error) {
 	return svc.ExportApiDocSpec()
 }
 
+// ExportApiProjectDoc 导出某个项目的「当前全量接口文档」（库内结构化行渲染，含最新一次
+// 变更事件摘要）。前端：ExportApiProjectDoc(projectId)
+func (a *App) ExportApiProjectDoc(projectId string) (string, error) {
+	svc, err := a.svcOrErr()
+	if err != nil {
+		return "", err
+	}
+	return svc.ExportApiProjectDoc(projectId)
+}
+
 // PreviewApiDocImport 导入预览（只读，绝不写库）：解析 → Issue → 与库中定义算 diff
 // → 领域候选/变更预览/确认闸提示。前端：PreviewApiDocImport(req)
 func (a *App) PreviewApiDocImport(req appsvc.ApiDocImportRequest) (appsvc.ApiDocImportPreview, error) {
