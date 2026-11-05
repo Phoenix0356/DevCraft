@@ -176,7 +176,7 @@ type ApiDocImportResult struct {
 type ApiEntryQuery struct {
 	ProjectID       string `json:"projectId"` // 必填
 	DomainID        string `json:"domainId"`  // 空 = 全项目
-	Keyword         string `json:"keyword"`   // 名称或路径模糊匹配（大小写不敏感）
+	Keyword         string `json:"keyword"`   // 名称或路径匹配：子串或跳字符子序列，大小写不敏感
 	IncludeInternal bool   `json:"includeInternal"`
 	IncludeRemoved  bool   `json:"includeRemoved"`
 }
@@ -1675,8 +1675,10 @@ func (s *Service) DeleteApiDomain(id string) error {
 	return nil
 }
 
-// ListApiEntries 接口条目列表：默认过滤 internal 与 removed；keyword 对名称/路径
-// 做大小写不敏感的模糊匹配。
+// ListApiEntries 接口条目列表：默认过滤 internal 与 removed；keyword 对名称/路径做
+// 大小写不敏感匹配，连续子串与跳字符子序列都算命中（子序列在前端搜索框里要能联想出来）。
+// 排序刻意不打乱：无 keyword 时沿用 store 的 ORDER BY sort, name；有 keyword 时
+// 「仅子序列命中」的排在「子串命中」的后面，同组内保持原序（稳定、可预期）。
 func (s *Service) ListApiEntries(q ApiEntryQuery) ([]store.ApiEntry, error) {
 	if strings.TrimSpace(q.ProjectID) == "" {
 		return nil, fmt.Errorf("请先选择接口项目")
@@ -1685,15 +1687,43 @@ func (s *Service) ListApiEntries(q ApiEntryQuery) ([]store.ApiEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]store.ApiEntry, 0, len(list))
 	kw := strings.ToLower(strings.TrimSpace(q.Keyword))
+	if kw == "" {
+		return list, nil
+	}
+	out := make([]store.ApiEntry, 0, len(list))
+	loose := make([]store.ApiEntry, 0) // 只跳字符命中的，排在精确命中之后
 	for _, e := range list {
-		if kw == "" || strings.Contains(strings.ToLower(e.Name), kw) ||
-			strings.Contains(strings.ToLower(e.PathRaw), kw) {
+		name := strings.ToLower(e.Name)
+		path := strings.ToLower(e.PathRaw)
+		switch {
+		case strings.Contains(name, kw) || strings.Contains(path, kw):
 			out = append(out, e)
+		case isSubSequence(kw, name) || isSubSequence(kw, path):
+			loose = append(loose, e)
 		}
 	}
-	return out, nil
+	return append(out, loose...), nil
+}
+
+// isSubSequence 判断 query 是否为 target 的子序列：字符逐个按先后顺序出现即可，
+// 不要求连续（"pwd" 命中 "/api/v1/demo/password"，中文关键字同样按 rune 逐个推进）。
+// query 为空视作命中全部。调用方负责把两侧都转成小写。
+func isSubSequence(query, target string) bool {
+	if query == "" {
+		return true
+	}
+	q := []rune(query)
+	i := 0
+	for _, r := range target {
+		if r == q[i] {
+			i++
+			if i == len(q) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // GetApiEntry 接口条目详情：条目 + 分组字段 + 命名结构 + 示例与 curl + 历史事件（反向关联）。

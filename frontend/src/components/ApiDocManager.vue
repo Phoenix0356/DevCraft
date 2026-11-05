@@ -9,10 +9,11 @@
     tab 用两个按钮 + v-if 切换实现（不是 n-tabs）：本模块三栏需要自己声明 height 与
     分区滚动，仓库无「全高 n-tabs」先例，硬穿 :deep() 不如沿用 ChatApp 的 view 字符串习惯。
     「接口」tab = 三栏：
-      左栏（固定 240px）：项目列表（ListApiProjects）→ 选中项目后拉领域（ListApiDomains）
+      左栏（固定 240px）：搜索框（keyword 交后端匹配名称/路径：子串或跳字符子序列，
+                          输入即防抖重查 + 下拉联想条目）→ 项目列表（ListApiProjects）
+                        → 选中项目后拉领域（ListApiDomains）
                           + 领域手工维护（改名 SaveApiDomain / 删除空领域 DeleteApiDomain）
                           + 「未归领域」筛选（domainId==='' 的残余条目，spec-draft §13.23）
-                          + 搜索框（keyword 交后端模糊匹配名称/路径）
       中栏（固定 320px）：接口列表（ListApiEntries），每行 method 徽标 + pathRaw + 名称 +
                           parseState 标记；「显示内部端点」「显示已删除」开关（默认都关）
       右栏（flex:1）：ApiEntryDetail（详情 + 手工编辑 + 软删/恢复）
@@ -38,7 +39,7 @@
     下次导入时的身份冲突。
 -->
 <script setup>
-import {computed, onMounted, ref} from 'vue'
+import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import {useMessage} from 'naive-ui'
 import {
   ListApiProjects, ListApiDomains, ListApiEntries,
@@ -139,12 +140,27 @@ async function loadDomains(keepSelection = false) {
   }
 }
 
-/** 接口列表：查询条件全部交后端（keyword/domainId/includeInternal/includeRemoved） */
+// ---------------- 左栏顶部：搜索（输入即查 + 下拉联想）----------------
+// 联想项与中栏列表同源、同一次请求：loadEntries 拿到过滤结果后直接取前 SUGG_CAP 条，
+// 不为联想面单开后端方法，也不会出现「下拉说一套、列表另一套」。
+const suggOpen = ref(false)
+const suggItems = ref([])
+const suggIndex = ref(0)   // 浮层高亮项下标（↑↓ 循环导航）
+const SEARCH_MIN = 2       // 少于 2 字符不弹浮层：子序列匹配下单字母几乎命中全部路径，没有信息量
+const SUGG_CAP = 50        // 浮层条数闸门（列表本身仍是完整过滤结果，只是不全列）
+let suggTimer = null
+let entriesSeq = 0         // 请求序号：防抖下响应会乱序返回，只认最新一次
+let lastQueryKw = ''       // 最近一次已发起查询的关键字（程序化赋值去重用）
+const composing = ref(false) // 中文输入法组合中（拼音还没上屏）——这串字母不是要搜的内容
+
+/** 接口列表：查询条件全部交后端（keyword/domainId/includeInternal/includeRemoved）。
+ *  entriesSeq 闸门保证「慢响应盖掉新关键字结果」这件事不发生（输入即查后这是常态竞态）。 */
 async function loadEntries() {
   if (!currentProjectId.value) {
     entries.value = []
     return
   }
+  const seq = ++entriesSeq
   listLoading.value = true
   const ungrouped = currentDomainId.value === UNGROUPED
   try {
@@ -156,20 +172,134 @@ async function loadEntries() {
       includeInternal: includeInternal.value,
       includeRemoved: includeRemoved.value
     })) || []
+    if (seq !== entriesSeq) return // 期间已发起新查询，本次响应作废
     entries.value = ungrouped ? list.filter(e => !e.domainId) : list
   } catch (err) {
+    if (seq !== entriesSeq) return
     entries.value = []
     message.error(String(err))
   } finally {
-    listLoading.value = false
+    if (seq === entriesSeq) listLoading.value = false
   }
 }
+
+/**
+ * 搜索关键字变化：250ms 防抖后重查。清空（含 clearable 的 ×）立即回全量，不等防抖。
+ * 两道去重：
+ *   · 组合态（拼音候选未上屏）直接返回——此时发出去的是英文字母串，compositionend 会再触发一次；
+ *   · 与最近一次已发起的关键字相同则跳过（pickSuggestion 程序化回填路径时会走到这里，
+ *     刚查过的内容不必再查一遍）。
+ */
+function onKeywordInput() {
+  if (suggTimer) clearTimeout(suggTimer)
+  if (composing.value) return
+  const kw = keyword.value.trim()
+  if (kw === lastQueryKw) return
+  if (!kw) {
+    lastQueryKw = ''
+    closeSugg()
+    loadEntries()
+    return
+  }
+  suggTimer = setTimeout(() => {
+    suggTimer = null
+    searchNow()
+  }, 250)
+}
+
+/** 一次完整搜索：列表与联想同一份结果 */
+async function searchNow() {
+  const kw = keyword.value.trim()
+  lastQueryKw = kw // 登记本次已查关键字，程序化回填同一个值时不必再查一遍
+  await loadEntries()
+  if (keyword.value.trim() !== kw) return // 等响应期间用户又改了输入，这批结果已过期
+  if (kw.length < SEARCH_MIN || !entries.value.length) {
+    closeSugg()
+    return
+  }
+  suggItems.value = entries.value.slice(0, SUGG_CAP)
+  suggIndex.value = 0
+  suggOpen.value = true
+}
+
+function closeSugg() {
+  suggOpen.value = false
+  suggItems.value = []
+  suggIndex.value = 0
+}
+
+/** 程序化清空搜索态（切项目 / 从事件跳转）：在途防抖与判重基准一起归零 */
+function resetSearch() {
+  if (suggTimer) clearTimeout(suggTimer)
+  suggTimer = null
+  lastQueryKw = ''
+  keyword.value = '' // 触发的 watch 会被上面的判重吃掉，不会多发一次查询
+  closeSugg()
+}
+
+/** 中文候选上屏（compositionend）：这之前发出去的都是拼音字母，此刻才补一次真查询 */
+function onCompositionEnd() {
+  composing.value = false
+  onKeywordInput()
+}
+
+/** 选中联想项：回填路径当关键字（列表与浮层看到同一批结果），并直接打开详情 */
+function pickSuggestion(i) {
+  const e = suggItems.value[i]
+  if (!e) return
+  closeSugg()
+  const kw = e.pathRaw || e.name
+  // 先登记再赋值：这次程序化改动触发的 watch 必须被判重吃掉，否则 250ms 后浮层会自己弹回来
+  lastQueryKw = kw
+  keyword.value = kw
+  loadEntries()
+  selectEntry(e)
+}
+
+/** ↑↓ 循环选择、Enter/Tab 打开、Esc 收起；浮层收起时 Enter 退回「按当前关键字重查」 */
+function onSearchKeydown(e) {
+  // 输入法组合态防御（照 ChatApp onEnterOrSend）：中文候选词按 Enter 上屏时，
+  // Firefox/Safari 会派发 key=Enter 且 isComposing=true 的 keydown，此时必须放行
+  if (e.isComposing || e.keyCode === 229) return
+  if (e.key === 'Escape') {
+    closeSugg()
+    return
+  }
+  if (!suggOpen.value || !suggItems.value.length) {
+    if (e.key === 'Enter') loadEntries()
+    return
+  }
+  const n = suggItems.value.length
+  if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    suggIndex.value = (suggIndex.value + 1) % n // 循环
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    suggIndex.value = (suggIndex.value - 1 + n) % n
+  } else if (e.key === 'Enter' || e.key === 'Tab') {
+    e.preventDefault() // 浮层打开时 Enter/Tab = 选中：Tab 不切换焦点，Enter 不再多发一次查询
+    pickSuggestion(suggIndex.value)
+  }
+}
+
+// 关键字变化统一走这里（含 clearable 的 ×、程序化赋值），不绑 @update:value：
+// 那只输入事件与 v-model 撞在同一个 prop 上，语义不如 watch 清楚（照 ChatApp 的 watch(input)）
+watch(keyword, onKeywordInput)
+
+// 高亮变化时把条目滚进可视区（浮层内部滚动，键盘导航不丢焦点项）
+watch(suggIndex, () => {
+  if (!suggOpen.value) return
+  nextTick(() => {
+    document.querySelector('.sugg-item.active')?.scrollIntoView({block: 'nearest'})
+  })
+})
 
 /** 切换项目：领域与列表都要重来，详情指向清空 */
 async function selectProject(p) {
   if (currentProjectId.value === p.id) return
   currentProjectId.value = p.id
   currentEntryId.value = ''
+  resetSearch() // 否则上个项目的联想下拉和迟到响应会串到新项目里
   await loadDomains()
   await loadEntries()
 }
@@ -183,6 +313,7 @@ async function selectProjectById(id) {
 function selectDomain(id) {
   if (currentDomainId.value === id) return
   currentDomainId.value = id
+  closeSugg() // 联想结果集是按领域拉的，换领域后旧条目就不属于当前筛选了
   loadEntries()
 }
 
@@ -203,6 +334,11 @@ async function bootstrap() {
 
 onMounted(() => {
   bootstrap().catch(err => message.error(String(err)))
+})
+
+// 组件随视图切换卸载（ChatApp 用 v-if），卸载前清掉未落地的防抖定时器
+onBeforeUnmount(() => {
+  if (suggTimer) clearTimeout(suggTimer)
 })
 
 /** 详情/列表刷新：接口条目发生手工编辑或软删/恢复后重拉，并把选中指向 fresh 对象
@@ -426,7 +562,7 @@ async function openEntryFromEvent(payload) {
   pendingEventId.value = 0
   if (!id) return
   currentDomainId.value = ''
-  keyword.value = ''
+  resetSearch() // 跳转是程序化改关键字，在途的联想要作废
   await loadEntries()
   if (!entries.value.some(e => e.id === id)) {
     includeInternal.value = true
@@ -520,8 +656,42 @@ function domainCrumb(id) {
 
       <!-- ---- 接口 tab：三栏 flex ---- -->
       <div v-else class="apidoc-cols">
-        <!-- ===== 左栏：项目 + 领域 + 搜索 ===== -->
+        <!-- ===== 左栏：搜索 + 项目 + 领域 ===== -->
         <aside class="col-left">
+          <!-- 搜索框常驻左栏顶部（选中项目才有意义：关键字过滤离不开项目作用域） -->
+          <template v-if="currentProjectId">
+            <div class="col-title no-margin">搜索</div>
+            <!-- 组合事件挂在包装层：composition* 会冒泡，不必依赖 n-input 是否转发 -->
+            <div class="search-wrap" @compositionstart="composing = true" @compositionend="onCompositionEnd">
+              <n-input
+                v-model:value="keyword"
+                size="small"
+                placeholder="接口名称或路径，支持跳字符匹配"
+                clearable
+                @keydown="onSearchKeydown"
+                @blur="closeSugg"
+              />
+              <!-- 联想浮层：绝对定位钉在输入框下方，浮在项目/领域列表之上 -->
+              <div v-if="suggOpen" class="sugg-pop">
+                <div
+                  v-for="(e, i) in suggItems" :key="e.id"
+                  class="sugg-item" :class="{active: i === suggIndex}"
+                  @mousedown.prevent="pickSuggestion(i)"
+                  @mouseenter="suggIndex = i"
+                >
+                  <span class="method-badge" :class="methodClass(e.method)">{{ e.method }}</span>
+                  <span class="sugg-main">
+                    <span class="sugg-path mono">{{ e.pathRaw }}</span>
+                    <span class="sugg-name">{{ e.name || '（无中文名）' }}</span>
+                  </span>
+                </div>
+                <div v-if="suggItems.length >= SUGG_CAP" class="sugg-foot">
+                  只列前 {{ SUGG_CAP }} 条，继续输入可缩小范围
+                </div>
+              </div>
+            </div>
+          </template>
+
           <div class="col-title">项目</div>
           <div class="proj-list">
             <div
@@ -592,16 +762,6 @@ function domainCrumb(id) {
               <div v-if="!domains.length" class="col-empty">该项目暂无领域</div>
             </div>
             <div class="domain-foot">领域由文档一级章节产生，只能改名或删除空领域。</div>
-
-            <div class="col-title domain-title">搜索</div>
-            <n-input
-              v-model:value="keyword"
-              size="small"
-              placeholder="接口名称或路径，回车搜索"
-              clearable
-              @keyup.enter="loadEntries"
-              @update:value="(v) => { if (v === '') loadEntries() }"
-            />
           </template>
         </aside>
 
@@ -717,6 +877,27 @@ function domainCrumb(id) {
 .no-margin { margin: 0; }
 .col-empty { font-size: 12px; color: rgba(255,255,255,0.4); line-height: 1.6; }
 .pad { padding: 8px; }
+
+/* ---- 左栏顶部搜索：定位上下文给联想浮层（浮层钉在输入框下方，不进文档流）---- */
+/* 浮层配色/圆角/阴影照 ChatApp.vue .sugg-pop（深色主题同一套：#232329 + 绿色高亮） */
+.search-wrap { position: relative; z-index: 30; }
+.sugg-pop {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0;
+  max-height: 260px; overflow-y: auto;
+  background: #232329; border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,0.45);
+  padding: 4px;
+}
+.sugg-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 12px; min-width: 0;
+}
+.sugg-item:hover, .sugg-item.active { background: rgba(99,226,183,0.15); }
+.sugg-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.sugg-path { color: rgba(255,255,255,0.85); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sugg-name { color: rgba(255,255,255,0.55); font-size: 11px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.sugg-foot { font-size: 11px; color: rgba(255,255,255,0.35); padding: 6px 8px; line-height: 1.5; }
 
 /* 行条目：选中态沿用仓库绿色（ChatApp.vue:871） */
 .row-item {

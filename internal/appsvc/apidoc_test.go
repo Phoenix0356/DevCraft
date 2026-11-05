@@ -1078,12 +1078,47 @@ func TestListApiEntriesQueryFilters(t *testing.T) {
 	if err != nil || len(withRemoved) != 4 {
 		t.Fatalf("includeRemoved 不对: %v %+v", err, withRemoved)
 	}
+	// keyword：跳字符子序列（连续子串命中）——"pwd" 不连续出现在路径里，但 p→w→d 顺序命中，
+	// 只有 password 那条排得出来
+	bySeq, err := svc.ListApiEntries(ApiEntryQuery{ProjectID: projectID, Keyword: "pwd"})
+	if err != nil || len(bySeq) != 1 || bySeq[0].PathRaw != "/api/v1/demo/password" {
+		t.Fatalf("子序列搜索不对: %v %+v", err, bySeq)
+	}
+	// keyword：乱序不命中（子序列要求先后顺序，倒着打字不能算匹配）
+	if none, err := svc.ListApiEntries(ApiEntryQuery{ProjectID: projectID, Keyword: "wdp"}); err != nil || len(none) != 0 {
+		t.Fatalf("乱序关键字应为 0 命中: %v %+v", err, none)
+	}
+	// keyword：demo 三个字母被打散重排 → 活跃条目的路径都含 d→e→m 顺序，全部命中
+	// （夹具里的「删除用户」是软删行，默认过滤掉，所以是 3 不是 4）
+	loose, err := svc.ListApiEntries(ApiEntryQuery{ProjectID: projectID, Keyword: "dmo"})
+	if err != nil || len(loose) != 3 {
+		t.Fatalf("跳字符关键字应 3 命中: %v %+v", err, loose)
+	}
 	// 缺 projectID → 中文错误
 	if _, err := svc.ListApiEntries(ApiEntryQuery{}); err == nil || !strings.Contains(err.Error(), "项目") {
 		t.Fatalf("缺 projectID 应中文报错: %v", err)
 	}
 	if _, err := svc.ListApiChangeEvents(ApiEventQuery{}); err == nil {
 		t.Fatal("事件列表缺 projectID 应报错")
+	}
+}
+
+func TestIsSubSequence(t *testing.T) {
+	cases := []struct {
+		query, target string
+		want          bool
+	}{
+		{"pwd", "/api/v1/demo/password", true},  // 跳字符按顺序
+		{"dmo", "/api/v1/demo/password", true},  // 重排字母
+		{"wdp", "/api/v1/demo/password", false}, // 乱序不命中
+		{"密码", "修改密码", true},                    // 中文按 rune 推进，不按字节
+		{"码修", "修改密码", false},                   // 中文同样讲先后
+		{"", "任意", true},                        // 空关键字命中全部
+	}
+	for _, c := range cases {
+		if got := isSubSequence(c.query, c.target); got != c.want {
+			t.Fatalf("isSubSequence(%q, %q) = %v，期望 %v", c.query, c.target, got, c.want)
+		}
 	}
 }
 

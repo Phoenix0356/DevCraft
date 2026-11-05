@@ -249,7 +249,7 @@ export function ListApiDomains(projectID) {
 }
 
 /**
- * ListApiEntries 接口条目列表（默认过滤 internal 与 removed；keyword 模糊匹配名称/路径）。
+ * ListApiEntries 接口条目列表（默认过滤 internal 与 removed；keyword 匹配名称/路径：子串或跳字符子序列）。
  * 前端：ListApiEntries(q)
  * @param {appsvc$0.ApiEntryQuery} q
  * @returns {$CancellablePromise<store$0.ApiEntry[]>}
